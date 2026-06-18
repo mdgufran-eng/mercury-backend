@@ -101,13 +101,14 @@ export function extract(source: Record<string, unknown>): ExtractedSegment[] {
 }
 
 // Reassemble target JSON from translated segments.
-// `translations` maps segmentId → translated tagged text.
+// Walks the ORIGINAL structure and replaces string values in place,
+// preserving all key names exactly (including dotted keys like "experience.title").
 export function reassemble(
   source: Record<string, unknown>,
   segments: ExtractedSegment[],
   translations: Map<string, string>,
 ): Record<string, unknown> {
-  // Group segments by fieldKey, ordered by sentenceIndex.
+  // Build fieldKey → joined translated string
   const byField = new Map<string, ExtractedSegment[]>();
   for (const seg of segments) {
     const list = byField.get(seg.fieldKey) ?? [];
@@ -115,18 +116,36 @@ export function reassemble(
     byField.set(seg.fieldKey, list);
   }
 
-  const target = structuredClone(source) as Record<string, unknown>;
-
+  const fieldValues = new Map<string, string>();
   for (const [fieldKey, segs] of byField) {
     segs.sort((a, b) => a.sentenceIndex - b.sentenceIndex);
     const parts = segs.map((seg) => {
-      const translatedTagged = translations.get(seg.id) ?? seg.source; // fall back to source
+      const translatedTagged = translations.get(seg.id) ?? seg.source;
       return expandTags(translatedTagged, seg.tags);
     });
-    setPath(target, fieldKey, parts.join(' '));
+    fieldValues.set(fieldKey, parts.join(' '));
   }
 
-  return target;
+  // Walk original structure with same path logic as collectStrings,
+  // replacing strings using the exact same key that was collected.
+  function replaceIn(value: unknown, prefix: string): unknown {
+    if (typeof value === 'string') {
+      return fieldValues.get(prefix) ?? value;
+    }
+    if (Array.isArray(value)) {
+      return value.map((v, i) => replaceIn(v, `${prefix}[${i}]`));
+    }
+    if (value !== null && typeof value === 'object') {
+      const result: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        result[k] = replaceIn(v, prefix ? `${prefix}.${k}` : k);
+      }
+      return result;
+    }
+    return value;
+  }
+
+  return replaceIn(source, '') as Record<string, unknown>;
 }
 
 export { expandTags };
