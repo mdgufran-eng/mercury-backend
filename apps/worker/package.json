@@ -1,0 +1,22 @@
+{
+  "name": "@mercury/worker",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@mercury/core": "*",
+    "bullmq": "^5.13.2",
+    "mongodb": "^6.9.0",
+    "ioredis": "^5.4.1",
+    "axios": "^1.7.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.3",
+    "tsx": "^4.19.1",
+    "@types/node": "^22.5.5"
+  }
+}
