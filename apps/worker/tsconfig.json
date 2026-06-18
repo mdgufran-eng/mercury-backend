@@ -2,9 +2,10 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
+    "rootDir": "src",
     "paths": {
-      "@mercury/core": ["../../packages/core/src/index.ts"]
+      "@mercury/core": ["../../packages/core/dist/index.d.ts"]
     }
   },
-  "include": ["src/**/*", "../../packages/core/src/**/*"]
+  "include": ["src/**/*"]
 }
