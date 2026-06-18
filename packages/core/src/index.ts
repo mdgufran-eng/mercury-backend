@@ -13,7 +13,7 @@ export { QUEUES } from './queues/names.js';
 export type { QueueName } from './queues/names.js';
 
 // ID generator
-export { nextId } from './utils/id.js';
+export { nextId, nextIdRange } from './utils/id.js';
 
 // Webhook builders
 export {

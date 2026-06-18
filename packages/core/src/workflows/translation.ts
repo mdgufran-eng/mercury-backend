@@ -16,7 +16,7 @@
 
 import { createHash } from 'crypto';
 import { Db } from 'mongodb';
-import { Collections, nextId } from '../index.js';
+import { Collections, nextId, nextIdRange } from '../index.js';
 import { Segmenter } from '../index.js';
 import { translateWithFallback } from '../translation/chain.js';
 import {
@@ -98,14 +98,17 @@ export async function persistSegments(
   let billableWords = 0;
   const docs: Segment[] = [];
 
-  for (const seg of segments) {
+  // Allocate all segment IDs in one round-trip instead of N sequential calls.
+  const segmentIds = await nextIdRange(db, 'segment', segments.length);
+
+  segments.forEach((seg, i) => {
     const isICE = tmHits.has(seg.id);
     const translatedTagged = allTranslations.get(seg.id) ?? seg.source;
     const targetExpanded = Segmenter.expandTags(translatedTagged, seg.tags);
     if (!isICE) billableWords += seg.wordCount;
 
     docs.push({
-      segmentId: await nextId(db, 'segment'),
+      segmentId: segmentIds[i]!,
       jobId,
       projectId,
       index: seg.sentenceIndex,
@@ -121,7 +124,7 @@ export async function persistSegments(
       createdAt: now,
       updatedAt: now,
     });
-  }
+  });
 
   if (docs.length > 0) await Collections.segments(db).insertMany(docs);
   return { billableWords, targetMap: allTranslations };
@@ -226,9 +229,10 @@ export async function persistHumanSegments(
   if (segments.length === 0) return;
   const now = new Date();
   const docs: Segment[] = [];
-  for (const seg of segments) {
+  const segmentIds = await nextIdRange(db, 'segment', segments.length);
+  segments.forEach((seg, i) => {
     docs.push({
-      segmentId: await nextId(db, 'segment'),
+      segmentId: segmentIds[i]!,
       jobId,
       projectId,
       index: seg.sentenceIndex,
@@ -244,7 +248,7 @@ export async function persistHumanSegments(
       createdAt: now,
       updatedAt: now,
     });
-  }
+  });
   await Collections.segments(db).insertMany(docs);
 }
 

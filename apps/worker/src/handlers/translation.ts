@@ -1,6 +1,7 @@
 import { Job } from 'bullmq';
 import { Db } from 'mongodb';
 import {
+  Collections,
   fetchProjectAndJob,
   segmentJob,
   translateMisses,
@@ -21,6 +22,18 @@ export async function handleTranslation(
   const { projectId, jobId } = job.data;
 
   const { project, job: jobDoc } = await fetchProjectAndJob(db, projectId, jobId);
+
+  // Idempotency: skip if this job was already processed (worker retry after crash).
+  if (jobDoc.status === 'FINISHED') {
+    job.log(`Job ${jobId} already FINISHED — skipping duplicate`);
+    return;
+  }
+  const existingSegments = await Collections.segments(db).countDocuments({ jobId });
+  if (existingSegments > 0) {
+    job.log(`Job ${jobId} already has ${existingSegments} segments — skipping duplicate`);
+    return;
+  }
+
   const { segments, sourceContent } = await segmentJob(jobDoc);
 
   // HUMAN: segment only — translators edit in the UI, complete via admin endpoint

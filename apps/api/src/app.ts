@@ -5,6 +5,7 @@ import multipart from '@fastify/multipart';
 import mongoPlugin from './plugins/mongo.js';
 import redisPlugin from './plugins/redis.js';
 import brokerPlugin from './plugins/broker.js';
+import errorHandlerPlugin from './plugins/errorHandler.js';
 
 import healthRoutes from './routes/health.js';
 import xtmProjectRoutes from './routes/xtm/projects.js';
@@ -21,6 +22,9 @@ import trainingDataRoutes from './routes/admin/trainingData.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: true });
+
+  // Error handler must be registered first so all routes use it
+  await fastify.register(errorHandlerPlugin);
 
   // Infrastructure plugins
   await fastify.register(cors, { origin: true });
