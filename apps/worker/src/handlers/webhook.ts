@@ -1,29 +1,52 @@
 import { Job } from 'bullmq';
+import axios from 'axios';
+import { Db } from 'mongodb';
+import { Collections } from '@mercury/core';
+import type { WebhookJobData } from '@mercury/core';
 
-export interface WebhookJobData {
-  callbackId: number;
-  projectId: number;
-  jobId?: number;
-  event: string;
-  url: string;
-  payload: Record<string, unknown>;
-}
+export type { WebhookJobData };
 
-/**
- * Handles webhook dispatch jobs from the `webhook` queue.
- * TODO:
- *  1. POST payload to url with a 10s timeout
- *  2. On success: update CallbackLog.success = true, responseStatus
- *  3. On failure: increment attempts, set lastAttemptAt
- *     - Retry up to 5 times with exponential backoff (handled by BullMQ opts)
- *     - After max retries: mark success = false, log failure
- */
-export async function handleWebhook(job: Job<WebhookJobData>): Promise<{ success: boolean }> {
-  console.log(`[webhook] Dispatching job ${job.id}`, {
-    event: job.data.event,
-    url: job.data.url,
-    projectId: job.data.projectId,
-  });
-  // TODO: implement HTTP dispatch with retry logic
-  return { success: true };
+export async function handleWebhook(job: Job<WebhookJobData>, db: Db): Promise<void> {
+  const { callbackId, projectId, event, url, method, headers, body } = job.data;
+
+  const now = new Date();
+
+  try {
+    const response = await axios({
+      method,
+      url,
+      headers: headers ?? {},
+      data: body,
+      timeout: 10_000,
+      validateStatus: () => true, // handle all statuses manually
+    });
+
+    const success = response.status >= 200 && response.status < 300;
+
+    await Collections.callbackLogs(db).updateOne(
+      { callbackId },
+      {
+        $set: {
+          responseStatus: response.status,
+          success,
+          lastAttemptAt: now,
+        },
+        $inc: { attempts: 1 },
+      },
+    );
+
+    if (!success) {
+      throw new Error(
+        `Callback ${event} to ${url} failed with status ${response.status} (projectId=${projectId})`,
+      );
+    }
+
+    job.log(`Delivered ${event} → ${url} [${response.status}]`);
+  } catch (err) {
+    await Collections.callbackLogs(db).updateOne(
+      { callbackId },
+      { $set: { lastAttemptAt: now }, $inc: { attempts: 1 } },
+    );
+    throw err;
+  }
 }

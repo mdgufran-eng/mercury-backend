@@ -1,6 +1,8 @@
 import fp from 'fastify-plugin';
 import { FastifyPluginAsync } from 'fastify';
 import { MongoClient, Db } from 'mongodb';
+import { createIndexes } from '@mercury/core';
+import { runSeed } from '@mercury/core';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -10,12 +12,16 @@ declare module 'fastify' {
 
 const mongoPlugin: FastifyPluginAsync = async (fastify) => {
   const uri = process.env['MONGODB_URI'] ?? 'mongodb://localhost:27017/mercury';
-  const client = new MongoClient(uri);
+  const client = new MongoClient(uri, { maxPoolSize: 20 });
   await client.connect();
 
-  const url = new URL(uri);
-  const dbName = url.pathname.replace(/^\//, '') || 'mercury';
+  const dbName = new URL(uri).pathname.replace(/^\//, '') || 'mercury';
   const db = client.db(dbName);
+
+  // Ensure indexes exist and reference data is seeded on every boot.
+  // Both operations are idempotent — safe to run repeatedly.
+  await createIndexes(db);
+  await runSeed(db);
 
   fastify.decorate('mongo', db);
 

@@ -1,8 +1,10 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
 
 import mongoPlugin from './plugins/mongo.js';
 import redisPlugin from './plugins/redis.js';
+import brokerPlugin from './plugins/broker.js';
 
 import healthRoutes from './routes/health.js';
 import xtmProjectRoutes from './routes/xtm/projects.js';
@@ -15,15 +17,16 @@ import adminCallbackRoutes from './routes/admin/callbacks.js';
 import adminCustomerRoutes from './routes/admin/customers.js';
 import adminTemplateRoutes from './routes/admin/templates.js';
 import adminFreelancerRoutes from './routes/admin/freelancers.js';
-import adminTmRoutes from './routes/admin/tm.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const fastify = Fastify({ logger: true });
 
   // Infrastructure plugins
   await fastify.register(cors, { origin: true });
+  await fastify.register(multipart, { limits: { fileSize: 50 * 1024 * 1024 } });
   await fastify.register(mongoPlugin);
   await fastify.register(redisPlugin);
+  await fastify.register(brokerPlugin);
 
   // Routes
   await fastify.register(healthRoutes);
@@ -41,7 +44,6 @@ export async function buildApp(): Promise<FastifyInstance> {
   await fastify.register(adminCustomerRoutes);
   await fastify.register(adminTemplateRoutes);
   await fastify.register(adminFreelancerRoutes);
-  await fastify.register(adminTmRoutes);
 
   return fastify;
 }

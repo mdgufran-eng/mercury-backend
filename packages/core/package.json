@@ -8,10 +8,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "ioredis": "^5.4.1",
     "mongodb": "^6.9.0",
-    "ioredis": "^5.4.1"
+    "saxes": "^6.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.19.21",
     "typescript": "^5.5.3"
   }
 }

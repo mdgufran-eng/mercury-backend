@@ -3,12 +3,13 @@ import type {
   Project,
   Job,
   Segment,
-  TMEntry,
   CallbackLog,
   Customer,
   Template,
   Freelancer,
   Counter,
+  Cost,
+  PurchaseOrder,
 } from '../types/domain.js';
 
 export function projects(db: Db): Collection<Project> {
@@ -23,9 +24,6 @@ export function segments(db: Db): Collection<Segment> {
   return db.collection<Segment>('segments');
 }
 
-export function translationMemory(db: Db): Collection<TMEntry> {
-  return db.collection<TMEntry>('translationMemory');
-}
 
 export function callbackLogs(db: Db): Collection<CallbackLog> {
   return db.collection<CallbackLog>('callbackLogs');
@@ -45,4 +43,12 @@ export function freelancers(db: Db): Collection<Freelancer> {
 
 export function counters(db: Db): Collection<Counter> {
   return db.collection<Counter>('counters');
+}
+
+export function costs(db: Db): Collection<Cost> {
+  return db.collection<Cost>('costs');
+}
+
+export function purchaseOrders(db: Db): Collection<PurchaseOrder> {
+  return db.collection<PurchaseOrder>('purchaseOrders');
 }

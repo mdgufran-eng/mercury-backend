@@ -1,24 +1,13 @@
 import { Job } from 'bullmq';
+import { Db } from 'mongodb';
+import type { CostPoJobData } from '@mercury/core';
 
-export interface CostPoJobData {
-  projectId: number;
-  billableWords: number;
-  ratePerWord?: number;
-  currency?: string;
-}
+export type { CostPoJobData };
 
-/**
- * Handles cost + purchase order generation from the `cost-po` queue.
- * TODO:
- *  1. Fetch project and all jobs from MongoDB
- *  2. Aggregate billableWords across jobs
- *  3. Apply rate card (ratePerWord from template or default)
- *  4. Generate cost record and persist to MongoDB
- *  5. Generate PO PDF/CSV and upload to MinIO
- *  6. Enqueue webhook for project-completion event if all jobs finished
- */
-export async function handleCostPo(job: Job<CostPoJobData>): Promise<{ success: boolean }> {
-  console.log(`[cost-po] Processing job ${job.id}`, job.data);
-  // TODO: implement cost calculation and PO generation
-  return { success: true };
+export async function handleCostPo(job: Job<CostPoJobData>, _db: Db): Promise<void> {
+  // Cost/PO creation is handled synchronously by POST /costs in the API (B5).
+  // This queue entry exists for future async PO generation (e.g. PDF rendering, B5+).
+  job.log(
+    `[cost-po] projectId=${job.data.projectId} billableWords=${job.data.billableWords} — handled by API`,
+  );
 }

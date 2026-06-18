@@ -1,20 +1,62 @@
 import { FastifyPluginAsync } from 'fastify';
+import { Collections } from '@mercury/core';
 
 const adminCallbackRoutes: FastifyPluginAsync = async (fastify) => {
-  // GET /admin/callbacks — list callback logs
-  fastify.get('/admin/callbacks', async (_request, reply) => {
-    // TODO: fetch callback logs with optional ?projectId=&success= filters
-    return reply.send({ data: [], total: 0 });
+  // GET /admin/api/callbacks?projectId=&success=&limit=&skip=
+  fastify.get('/admin/api/callbacks', async (request, reply) => {
+    const q = request.query as {
+      projectId?: string;
+      success?: string;
+      limit?: string;
+      skip?: string;
+    };
+
+    const filter: Record<string, unknown> = {};
+    if (q.projectId) filter['projectId'] = parseInt(q.projectId, 10);
+    if (q.success !== undefined) filter['success'] = q.success === 'true';
+
+    const limit = Math.min(parseInt(q.limit ?? '50', 10), 200);
+    const skip = parseInt(q.skip ?? '0', 10);
+    const db = fastify.mongo;
+
+    const [data, total] = await Promise.all([
+      Collections.callbackLogs(db).find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+      Collections.callbackLogs(db).countDocuments(filter),
+    ]);
+
+    return reply.send({ data, total, limit, skip });
   });
 
-  // POST /admin/callbacks/:id/resend — re-enqueue a failed callback
-  fastify.post<{ Params: { id: string } }>('/admin/callbacks/:id/resend', async (_request, reply) => {
-    // TODO: look up callbackLog, enqueue webhook job with existing payload
-    return reply.status(501).send({
-      error: 'Not Implemented',
-      message: 'TODO: resend callback by callbackId',
-    });
-  });
+  // POST /admin/api/callbacks/:id/resend — re-enqueue a failed callback
+  fastify.post<{ Params: { id: string } }>(
+    '/admin/api/callbacks/:id/resend',
+    async (request, reply) => {
+      const callbackId = parseInt(request.params.id, 10);
+      const db = fastify.mongo;
+
+      const log = await Collections.callbackLogs(db).findOne({ callbackId });
+      if (!log) return reply.status(404).send({ error: 'Callback log not found' });
+
+      // Reset state and re-enqueue
+      await Collections.callbackLogs(db).updateOne(
+        { callbackId },
+        { $set: { success: false, responseStatus: undefined } },
+      );
+
+      await fastify.broker.enqueueWebhook({
+        callbackId: log.callbackId,
+        projectId: log.projectId,
+        jobId: log.jobId,
+        event: log.event,
+        url: log.url,
+        method: log.method,
+        headers: log.headers,
+        body: log.body,
+      });
+
+      return reply.send({ success: true, callbackId });
+    },
+  );
 };
 
 export default adminCallbackRoutes;

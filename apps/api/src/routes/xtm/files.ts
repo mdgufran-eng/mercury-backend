@@ -1,38 +1,193 @@
 import { FastifyPluginAsync } from 'fastify';
+import JSZip from 'jszip';
+import { Collections, nextId } from '@mercury/core';
+import type { Job } from '@mercury/core';
+import { createHash } from 'crypto';
+
+const BASE = '/project-manager-api-rest/projects/:projectId';
 
 const xtmFileRoutes: FastifyPluginAsync = async (fastify) => {
-  const BASE = '/project-manager-api-rest/projects/:projectId';
+  // GET /:projectId/files/status — legacy path kept for compatibility; analysis is always FINISHED
+  fastify.get<{ Params: { projectId: string } }>(`${BASE}/files/status`, async (request, reply) => {
+    const projectId = parseInt(request.params.projectId, 10);
+    const jobs = await Collections.jobs(fastify.mongo).find({ projectId }).toArray();
+    if (jobs.length === 0) return reply.status(404).send({ error: 'No jobs found for project' });
 
-  // POST /project-manager-api-rest/projects/:projectId/files — upload source files
-  fastify.post<{ Params: { projectId: string } }>(`${BASE}/files`, async (_request, reply) => {
-    return reply.status(501).send({
-      error: 'Not Implemented',
-      message: 'TODO: accept multipart upload, store to MinIO, create Job record, trigger analysis',
+    return reply.send({
+      projectId,
+      status: 'FINISHED',
+      jobs: (jobs as Job[]).map((j) => ({
+        jobId: j.jobId,
+        fileName: j.fileName,
+        status: 'FINISHED',
+      })),
     });
   });
 
-  // GET /project-manager-api-rest/projects/:projectId/files/status — analysis status
-  fastify.get<{ Params: { projectId: string } }>(`${BASE}/files/status`, async (_request, reply) => {
-    return reply.status(501).send({
-      error: 'Not Implemented',
-      message: 'TODO: return analysis/word-count status for all jobs in the project',
-    });
+  // POST /:projectId/files/sources/upload — upload additional / replacement source files
+  // rosetta sends files as `files[N].file` parts; matchType = "MATCH_NAMES" form field
+  fastify.post<{ Params: { projectId: string }; Querystring: { reanalyseProject?: string } }>(
+    `${BASE}/files/sources/upload`,
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const db = fastify.mongo;
+
+      const project = await Collections.projects(db).findOne({ projectId });
+      if (!project) return reply.status(404).send({ error: 'Project not found' });
+
+      const fields: Record<string, string> = {};
+      const files: Array<{ fieldname: string; filename: string; buffer: Buffer }> = [];
+
+      for await (const part of request.parts()) {
+        if (part.type === 'field') {
+          fields[part.fieldname] = part.value as string;
+        } else {
+          const buffer = await part.toBuffer();
+          files.push({ fieldname: part.fieldname, filename: part.filename, buffer });
+        }
+      }
+
+      const broker = fastify.broker;
+      const now = new Date();
+      const jobResults: Array<{ jobId: number; fileName: string; action: 'created' | 'replaced' }> = [];
+
+      for (const f of files) {
+        const sourceHash = createHash('sha256').update(f.buffer).digest('hex');
+        let sourceContent: Record<string, unknown> = {};
+        try {
+          sourceContent = JSON.parse(f.buffer.toString('utf-8'));
+        } catch {
+          // non-JSON
+        }
+
+        const existing = await Collections.jobs(db).findOne({ projectId, fileName: f.filename });
+
+        if (existing) {
+          if (existing.sourceHash !== sourceHash) {
+            await Collections.jobs(db).updateOne(
+              { jobId: existing.jobId },
+              {
+                $set: {
+                  sourceHash,
+                  sourceContent,
+                  targetContent: undefined,
+                  status: 'CREATED',
+                  wordCount: 0,
+                  billableWords: 0,
+                  updatedAt: now,
+                },
+              },
+            );
+            await broker.enqueueTranslate({
+              projectId,
+              jobId: existing.jobId,
+              sourceLanguage: project.sourceLanguage,
+              targetLanguage: project.targetLanguage,
+            });
+          }
+          jobResults.push({ jobId: existing.jobId, fileName: f.filename, action: 'replaced' });
+        } else {
+          const jobId = await nextId(db, 'job');
+          const job: Job = {
+            jobId,
+            projectId,
+            fileName: f.filename,
+            sourceFileKey: `projects/${projectId}/jobs/${jobId}/source/${f.filename}`,
+            status: 'CREATED',
+            wordCount: 0,
+            billableWords: 0,
+            sourceHash,
+            sourceContent,
+            createdAt: now,
+            updatedAt: now,
+          };
+          await Collections.jobs(db).insertOne(job);
+          await broker.enqueueTranslate({
+            projectId,
+            jobId,
+            sourceLanguage: project.sourceLanguage,
+            targetLanguage: project.targetLanguage,
+          });
+          jobResults.push({ jobId, fileName: f.filename, action: 'created' });
+        }
+      }
+
+      return reply.status(201).send({ projectId, jobs: jobResults });
+    },
+  );
+
+  // GET /:projectId/files/download?fileType=TARGET[&jobIds=123,456]
+  // Each file in the zip preserves rosetta's {content, metadata} envelope byte-for-byte.
+  fastify.get<{
+    Params: { projectId: string };
+    Querystring: { fileType?: string; jobIds?: string };
+  }>(`${BASE}/files/download`, async (request, reply) => {
+    const projectId = parseInt(request.params.projectId, 10);
+    const db = fastify.mongo;
+
+    const project = await Collections.projects(db).findOne({ projectId });
+    if (!project) return reply.status(404).send({ error: 'Project not found' });
+
+    let jobFilter: Record<string, unknown> = { projectId };
+    if (request.query.jobIds) {
+      const ids = request.query.jobIds
+        .split(',')
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !isNaN(n));
+      jobFilter = { projectId, jobId: { $in: ids } };
+    }
+
+    const jobs = (await Collections.jobs(db).find(jobFilter).toArray()) as Job[];
+    const unfinished = jobs.filter((j) => j.status !== 'FINISHED');
+    if (unfinished.length > 0) {
+      return reply.status(409).send({
+        error: 'Not all jobs are finished',
+        pending: unfinished.map((j) => j.jobId),
+      });
+    }
+
+    const zip = new JSZip();
+    for (const job of jobs) {
+      const source = (job.sourceContent ?? {}) as Record<string, unknown>;
+      const isRosettaFile =
+        source['content'] !== null &&
+        typeof source['content'] === 'object' &&
+        source['metadata'] !== undefined;
+
+      let zipEntry: unknown;
+      if (isRosettaFile) {
+        // Preserve original metadata, swap content with translated version
+        zipEntry = {
+          content: (job.targetContent as Record<string, unknown>)?.['content']
+            ?? job.targetContent
+            ?? source['content'],
+          metadata: source['metadata'],
+        };
+      } else {
+        zipEntry = {
+          content: job.targetContent ?? source,
+          metadata: {
+            jobId: job.jobId,
+            projectId,
+            fileName: job.fileName,
+            sourceLanguage: project.sourceLanguage,
+            targetLanguage: project.targetLanguage,
+          },
+        };
+      }
+
+      zip.file(job.fileName, JSON.stringify(zipEntry));
+    }
+
+    const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    reply.header('Content-Type', 'application/zip');
+    reply.header('Content-Disposition', `attachment; filename="project-${projectId}-translations.zip"`);
+    return reply.send(buffer);
   });
 
-  // GET /project-manager-api-rest/projects/:projectId/files/download — download target zip
-  fastify.get<{ Params: { projectId: string } }>(`${BASE}/files/download`, async (_request, reply) => {
-    return reply.status(501).send({
-      error: 'Not Implemented',
-      message: 'TODO: fetch translated files from MinIO, zip, stream response',
-    });
-  });
-
-  // PUT /project-manager-api-rest/projects/:projectId/files — reanalyze
+  // PUT /:projectId/files — reanalyze (B7)
   fastify.put<{ Params: { projectId: string } }>(`${BASE}/files`, async (_request, reply) => {
-    return reply.status(501).send({
-      error: 'Not Implemented',
-      message: 'TODO: re-upload source file and trigger fresh analysis + translation',
-    });
+    return reply.status(501).send({ error: 'Not Implemented', message: 'Implemented in Phase B7' });
   });
 };
 

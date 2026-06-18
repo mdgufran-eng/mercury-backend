@@ -1,6 +1,18 @@
+export type XTMActivity =
+  | 'ACTIVE'
+  | 'ARCHIVED'
+  | 'AUTO_ARCHIVED'
+  | 'DELETED'
+  | 'INACTIVE'
+  | 'ACTIVATING'
+  | 'ARCHIVING'
+  | 'AUTO_ARCHIVING'
+  | 'MARKED_FOR_ACTIVATION';
+
 export type ProjectStatus = 'CREATED' | 'ACTIVE' | 'IN_PROGRESS' | 'FINISHED' | 'FAILED';
 export type TranslationMethod = 'MACHINE' | 'HUMAN';
 export type SegmentMatchType = 'ICE' | 'MT';
+export type SegmentState = 'PENDING' | 'TRANSLATED' | 'APPROVED' | 'REJECTED';
 export type JobStatus = 'CREATED' | 'IN_PROGRESS' | 'FINISHED' | 'FAILED';
 export type CallbackEvent =
   | 'project-created'
@@ -12,14 +24,19 @@ export type CallbackEvent =
 
 export interface Project {
   _id?: string;
-  projectId: number;          // numeric, from atomic counter
-  name: string;               // rosetta uses name for lookup
+  projectId: number;
+  name: string;
   customerId: number;
   templateId: number;
   sourceLanguage: string;
   targetLanguage: string;
   method: TranslationMethod;
   status: ProjectStatus;
+  activity: XTMActivity;
+  completionStatus?: string;
+  referenceId?: string;
+  description?: string;
+  freelancerId?: number;
   callbackUrls: {
     projectCreated?: string;
     analysisFinished?: string;
@@ -37,12 +54,14 @@ export interface Job {
   jobId: number;
   projectId: number;
   fileName: string;
-  sourceFileKey: string;       // MinIO object key
+  sourceFileKey: string;
   targetFileKey?: string;
   status: JobStatus;
   wordCount: number;
-  billableWords: number;       // MT-miss words only
-  sourceHash: string;          // SHA-256 of source content
+  billableWords: number;
+  sourceHash: string;
+  sourceContent?: Record<string, unknown>;
+  targetContent?: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -53,13 +72,15 @@ export interface Segment {
   jobId: number;
   projectId: number;
   index: number;
+  fieldKey: string;
   source: string;
   target?: string;
   sourceHash: string;
   matchType?: SegmentMatchType;
+  state: SegmentState;
   approved: boolean;
   locked: boolean;
-  tags: string[];              // extracted inline tags {1}{2}
+  tags: Record<string, string>;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -71,6 +92,7 @@ export interface TMEntry {
   sourceHash: string;
   sourceText: string;
   targetText: string;
+  origin?: 'APPROVED' | 'IMPORTED_TMX';
   createdAt: Date;
 }
 
@@ -81,6 +103,9 @@ export interface CallbackLog {
   jobId?: number;
   event: CallbackEvent;
   url: string;
+  method: 'GET' | 'POST';
+  headers?: Record<string, string>;
+  body?: string;
   payload: Record<string, unknown>;
   responseStatus?: number;
   attempts: number;
@@ -93,6 +118,7 @@ export interface Customer {
   _id?: string;
   customerId: number;
   name: string;
+  type?: 'HUMAN' | 'MACHINE' | 'PAYLOAD';
   createdAt: Date;
 }
 
@@ -112,10 +138,41 @@ export interface Freelancer {
   name: string;
   email: string;
   languages: string[];
+  ratePerWord: number;
+  currency: string;
+  createdAt: Date;
+}
+
+export interface Cost {
+  _id?: string;
+  costId: number;
+  projectId: number;
+  jobId?: number;
+  freelancerId?: number;
+  vendorFirstName?: string;
+  vendorLastName?: string;
+  totalWords: number;
+  billableWords: number;
+  ratePerWord: number;
+  amount: number;
+  currency: string;
+  createdAt: Date;
+}
+
+export interface PurchaseOrder {
+  _id?: string;
+  poId: number;
+  costId: number;
+  projectId: number;
+  freelancerId?: number;
+  vendorName: string;
+  amount: number;
+  currency: string;
+  processId: string;
   createdAt: Date;
 }
 
 export interface Counter {
-  _id: string;   // e.g. 'projectId', 'jobId', 'segmentId'
+  _id: string;
   seq: number;
 }

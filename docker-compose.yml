@@ -1,20 +1,72 @@
 version: '3.9'
+
 services:
+  # ── Datastores ──────────────────────────────────────────────────────────────
   mongo:
     image: mongo:7
     ports: ['27017:27017']
     volumes: ['mongo_data:/data/db']
+    healthcheck:
+      test: ['CMD', 'mongosh', '--eval', 'db.adminCommand("ping")']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   redis:
     image: redis:7-alpine
     ports: ['6379:6379']
-  minio:
-    image: minio/minio
-    ports: ['9000:9000', '9001:9001']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Mercury API ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports: ['3000:3000']
     environment:
-      MINIO_ROOT_USER: mercury
-      MINIO_ROOT_PASSWORD: mercury123
-    command: server /data --console-address ":9001"
-    volumes: ['minio_data:/data']
+      MONGODB_URI: mongodb://mongo:27017/mercury
+      REDIS_URL: redis://redis:6379
+      ML_SERVICE_URL: ${ML_SERVICE_URL:-http://host.docker.internal:8000}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3-flash}
+      MIN_TRANSLATION_CONFIDENCE: ${MIN_TRANSLATION_CONFIDENCE:-0.7}
+      API_PORT: 3000
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ── Mercury Worker ───────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/mercury
+      REDIS_URL: redis://redis:6379
+      ML_SERVICE_URL: ${ML_SERVICE_URL:-http://host.docker.internal:8000}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3-flash}
+      MIN_TRANSLATION_CONFIDENCE: ${MIN_TRANSLATION_CONFIDENCE:-0.7}
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ── Mercury Frontend ─────────────────────────────────────────────────────────
+  web:
+    build:
+      context: ../mercury-frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:3000
+    ports: ['5173:80']
+    depends_on: [api]
+    restart: unless-stopped
+
 volumes:
   mongo_data:
-  minio_data:
