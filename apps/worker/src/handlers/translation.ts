@@ -10,6 +10,7 @@ import {
   finaliseJob,
   fireJobCallbacks,
   persistHumanSegments,
+  MongoTM,
 } from '@mercury/core';
 import type { TranslateJobData, MessageBroker } from '@mercury/core';
 
@@ -53,34 +54,48 @@ export async function handleTranslation(
 
   const { sourceLanguage, targetLanguage } = project;
 
-  // Fix 5: reuse cached translations for unchanged segments (set by reanalyze/re-upload).
-  // segmentCache maps sourceHash → previous target so unchanged sentences skip ML entirely.
+  // Reuse cached translations for unchanged segments (set by reanalyze/re-upload).
   const rawCache = (jobDoc as unknown as Record<string, unknown>)['segmentCache'] as Record<string, string> | undefined;
-  const cachedHits = new Map<string, string>(); // segId → cached target
+  const cachedHits = new Map<string, string>();
   const needsML: typeof segments = [];
 
   if (rawCache && Object.keys(rawCache).length > 0) {
     for (const seg of segments) {
       const hash = createHash('sha256').update(seg.source.trim().replace(/\s+/g, ' ')).digest('hex');
       const cached = rawCache[hash];
-      if (cached) {
-        cachedHits.set(seg.id, cached);
-      } else {
-        needsML.push(seg);
-      }
+      if (cached) cachedHits.set(seg.id, cached);
+      else needsML.push(seg);
     }
-    // Clear cache after use — it's a one-shot operational field
     await Collections.jobs(db).updateOne({ jobId }, { $unset: { segmentCache: '' } });
     job.log(`Segment cache: ${cachedHits.size} reused, ${needsML.length} to translate`);
   } else {
     needsML.push(...segments);
   }
 
-  const mtMap = await translateMisses(needsML, sourceLanguage, targetLanguage);
+  // ── MongoDB TM lookup ($in query, one round-trip) ─────────────────────────
+  // Only checks sentences ≤ 20 words — where hit rate is meaningful (10-43%).
+  const afterCache = needsML;
+  const tmHits = await MongoTM.batchLookup(
+    db,
+    afterCache.map((s) => ({ id: s.id, text: s.source })),
+    sourceLanguage,
+    targetLanguage,
+  );
+
+  for (const [segId, target] of tmHits) {
+    cachedHits.set(segId, target);
+  }
+  const afterTM = afterCache.filter((s) => !tmHits.has(s.id));
+
+  if (tmHits.size > 0) {
+    job.log(`MongoDB TM: ${tmHits.size} hits, ${afterTM.length} to ML service`);
+  }
+
+  const mtMap = await translateMisses(afterTM, sourceLanguage, targetLanguage);
 
   const { billableWords, targetMap } = await persistSegments(
     db, jobId, projectId, segments,
-    cachedHits, // treated as ICE hits — free, no ML cost
+    cachedHits,
     mtMap,
   );
 
@@ -88,6 +103,6 @@ export async function handleTranslation(
   await fireJobCallbacks(db, broker, project, jobId);
 
   job.log(
-    `Done: ${segments.length} segments, ${cachedHits.size} cached (ICE), ${needsML.length} translated (MT), ${billableWords} billable words`,
+    `Done: ${segments.length} segs — ${tmHits.size} TM hits (free) + ${cachedHits.size - tmHits.size} cache hits + ${afterTM.length} ML translated — ${billableWords} billable words`,
   );
 }

@@ -10,10 +10,12 @@
   "dependencies": {
     "ioredis": "^5.4.1",
     "mongodb": "^6.9.0",
-    "saxes": "^6.0.0"
+    "saxes": "^6.0.0",
+    "sbd": "^1.0.19"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",
+    "@types/sbd": "^1.0.5",
     "typescript": "^5.5.3"
   }
 }

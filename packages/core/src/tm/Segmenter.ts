@@ -1,6 +1,11 @@
 // Sentence-level segmenter with inline-tag extraction.
 // Tags (HTML, {variable}, {{variable}}, %s etc.) are replaced with {N} placeholders
 // so the TM can match across formatting differences.
+//
+// Sentence splitting: sbd (Sentence Boundary Disambiguation) with OmegaT-inspired
+// abbreviation rules prevents incorrect splits on "Dr.", "No. 6 Dock", "approx.", etc.
+
+import sbd from 'sbd';
 
 export interface ExtractedSegment {
   id: string; // `${fieldKey}::${sentenceIndex}`
@@ -73,16 +78,44 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown): vo
   (cur as Record<string, unknown>)[lastKey] = value;
 }
 
+// Abbreviations that must NOT cause sentence breaks.
+// Sourced from OmegaT defaultRules.srx + travel-domain additions.
+const TRAVEL_ABBREVIATIONS = [
+  // Titles
+  'Mr', 'Mrs', 'Ms', 'Miss', 'Dr', 'Prof', 'Rev', 'Gen', 'Sgt', 'Cpl', 'Pvt',
+  // Places / directions
+  'St', 'Mt', 'Ft', 'Ave', 'Blvd', 'Rd', 'Sq', 'Jr', 'Sr',
+  // Travel-specific
+  'No', 'Vol', 'approx', 'incl', 'excl', 'max', 'min', 'avg', 'dept',
+  'tel', 'ext', 'vs', 'cf', 'pp', 'ed',
+  // Latin
+  'e.g', 'i.e', 'etc', 'P.S', 'N.B',
+];
+
+const SBD_OPTIONS: sbd.Options = {
+  newline_boundaries: true,        // split on newlines (good for bullet lists)
+  html_boundaries: false,          // we handle HTML ourselves via tag extraction
+  sanitize: false,
+  allowed_tags: false as const,
+  abbreviations: TRAVEL_ABBREVIATIONS,
+};
+
+// Split text into sentences using sbd — handles abbreviations correctly.
+function splitSentences(text: string): string[] {
+  return sbd.sentences(text, SBD_OPTIONS)
+    .map((s: string) => s.trimEnd())
+    .filter((s: string) => s.trim().length > 0);
+}
+
 // Extract all translatable segments from a JSON source object.
 export function extract(source: Record<string, unknown>): ExtractedSegment[] {
   const leaves: Array<{ key: string; value: string }> = [];
   collectStrings(source, '', leaves);
 
-  const segmenter = new Intl.Segmenter(undefined, { granularity: 'sentence' });
   const segments: ExtractedSegment[] = [];
 
   for (const { key, value } of leaves) {
-    const sentences = [...segmenter.segment(value)].map((s) => s.segment.trimEnd());
+    const sentences = splitSentences(value);
     sentences.forEach((sentence, sentenceIndex) => {
       if (!sentence.trim()) return;
       const { tagged, tags } = extractTags(sentence);

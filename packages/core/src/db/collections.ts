@@ -3,6 +3,7 @@ import type {
   Project,
   Job,
   Segment,
+  TMEntry,
   CallbackLog,
   Customer,
   Template,
@@ -51,4 +52,8 @@ export function costs(db: Db): Collection<Cost> {
 
 export function purchaseOrders(db: Db): Collection<PurchaseOrder> {
   return db.collection<PurchaseOrder>('purchaseOrders');
+}
+
+export function translationMemory(db: Db): Collection<TMEntry> {
+  return db.collection<TMEntry>('translationMemory');
 }

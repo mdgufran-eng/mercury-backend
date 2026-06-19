@@ -1,5 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
-import { Collections, QA } from '@mercury/core';
+import { Collections, QA, MongoTM } from '@mercury/core';
 import type { Segment } from '@mercury/core';
 
 const adminSegmentRoutes: FastifyPluginAsync = async (fastify) => {
@@ -80,6 +80,18 @@ const adminSegmentRoutes: FastifyPluginAsync = async (fastify) => {
       const qaResult = QA.runQA(segment.source, segment.target);
       if (!qaResult.passed) {
         return reply.status(422).send({ errors: qaResult.errors });
+      }
+
+      // Write approved translation to MongoDB TM so future projects get it for free
+      const project = await Collections.projects(db).findOne({ projectId });
+      if (project) {
+        await MongoTM.store(
+          db,
+          segment.source,
+          segment.target,
+          project.sourceLanguage,
+          project.targetLanguage,
+        ).catch(() => { /* non-fatal — TM write failure doesn't block approval */ });
       }
 
       await Collections.segments(db).updateOne(

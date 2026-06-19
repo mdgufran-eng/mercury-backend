@@ -18,6 +18,7 @@ import adminCallbackRoutes from './routes/admin/callbacks.js';
 import adminCustomerRoutes from './routes/admin/customers.js';
 import adminTemplateRoutes from './routes/admin/templates.js';
 import adminFreelancerRoutes from './routes/admin/freelancers.js';
+import adminTmRoutes from './routes/admin/tm.js';
 import trainingDataRoutes from './routes/admin/trainingData.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
@@ -49,6 +50,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await fastify.register(adminCustomerRoutes);
   await fastify.register(adminTemplateRoutes);
   await fastify.register(adminFreelancerRoutes);
+  await fastify.register(adminTmRoutes);
   await fastify.register(trainingDataRoutes);
 
   return fastify;

@@ -42,6 +42,9 @@ export * as MLService from './ml/MLServiceClient.js';
 // ── Segmenter (sentence split + tag extraction, runs locally) ─────────────────
 export * as Segmenter from './tm/Segmenter.js';
 
+// ── MongoDB TM (exact match, short sentences only, TM_WORD_LIMIT ≤ 20) ───────
+export * as MongoTM from './tm/MongoTM.js';
+
 // ── QA checks (used for segment approval) ─────────────────────────────────────
 export * as QA from './tm/qa.js';
 

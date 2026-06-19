@@ -24,5 +24,11 @@ Collections.callbackLogs(db).createIndex({ projectId: 1 }),
 
     Collections.purchaseOrders(db).createIndex({ costId: 1 }),
     Collections.purchaseOrders(db).createIndex({ processId: 1 }, { unique: true }),
+
+    Collections.translationMemory(db).createIndex(
+      { sourceLanguage: 1, targetLanguage: 1, sourceHash: 1 },
+      { unique: true },
+    ),
+    Collections.translationMemory(db).createIndex({ sourceHash: 'hashed' }),
   ]);
 }
