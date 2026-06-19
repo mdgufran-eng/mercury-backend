@@ -41,6 +41,8 @@ const trainingDataRoutes: FastifyPluginAsync = async (fastify) => {
 
     const since = q.since ? new Date(q.since) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const until = q.until ? new Date(q.until) : new Date();
+    if (isNaN(since.getTime())) return reply.status(400).send({ error: `Invalid 'since' date: ${q.since}` });
+    if (isNaN(until.getTime())) return reply.status(400).send({ error: `Invalid 'until' date: ${q.until}` });
     const limit = Math.min(parseInt(q.limit ?? '10000', 10), 50_000);
     const format = q.format === 'json' ? 'json' : 'jsonl';
 

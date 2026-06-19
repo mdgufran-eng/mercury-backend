@@ -4,8 +4,9 @@ import { translationMemory } from '../db/collections.js';
 
 export const TM_WORD_LIMIT = 20;
 
-// Must match Segmenter.ts extractTags() so lookup keys align with import keys.
-const INLINE_TAG_RE =
+// Shared with Segmenter.ts — exported so both use the identical pattern.
+// Order: HTML tags first, then double-brace, single-brace variable, printf.
+export const INLINE_TAG_RE =
   /<[^>]+?>|<!--[\s\S]*?-->|\{\{[^}]+\}\}|\{[a-zA-Z_][^}]*\}|%[sdife]/g;
 
 function normalize(text: string): string {

@@ -17,7 +17,11 @@ const adminTmRoutes: FastifyPluginAsync = async (fastify) => {
     const filter: Record<string, unknown> = {};
     if (q.sourceLang) filter['sourceLanguage'] = q.sourceLang.toUpperCase();
     if (q.targetLang) filter['targetLanguage'] = q.targetLang.toLowerCase();
-    if (q.q) filter['sourceText'] = { $regex: q.q, $options: 'i' };
+    if (q.q) {
+      // Escape regex metacharacters to prevent ReDoS and unintended wildcard matches
+      const escaped = q.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter['sourceText'] = { $regex: escaped, $options: 'i' };
+    }
 
     const limit = Math.min(parseInt(q.limit ?? '50', 10), 200);
     const skip = parseInt(q.skip ?? '0', 10);
@@ -40,8 +44,9 @@ const adminTmRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post('/admin/api/tm/import', async (request, reply) => {
     const db = fastify.mongo;
     let sourceLang = 'en';
-    let targetLang = 'fr';
+    let targetLang = '';          // intentionally empty — must be provided by caller
     let fileBuffer: Buffer | null = null;
+    const MAX_TMX_BYTES = 800 * 1024 * 1024; // 800 MB hard cap to prevent OOM
 
     for await (const part of request.parts()) {
       if (part.type === 'field') {
@@ -49,11 +54,16 @@ const adminTmRoutes: FastifyPluginAsync = async (fastify) => {
         if (part.fieldname === 'targetLang') targetLang = (part.value as string).toLowerCase();
       } else if (!fileBuffer) {
         fileBuffer = await part.toBuffer();
+        if (fileBuffer.length > MAX_TMX_BYTES) {
+          return reply.status(413).send({
+            error: `TMX file too large (max 800 MB, got ${(fileBuffer.length / 1e6).toFixed(0)} MB)`,
+          });
+        }
       }
     }
 
     if (!fileBuffer) return reply.status(400).send({ error: 'No TMX file provided (field: "file")' });
-    if (!targetLang) return reply.status(400).send({ error: 'targetLang field required' });
+    if (!targetLang) return reply.status(400).send({ error: 'targetLang field required (e.g. "fr")' });
 
     // Parse TMX from buffer using saxes
     const pairs: Array<[string, string]> = await new Promise((resolve, reject) => {
@@ -95,6 +105,7 @@ const adminTmRoutes: FastifyPluginAsync = async (fastify) => {
     const freq = new Map<string, Map<string, number>>();
     for (const [en, fr] of pairs) {
       if (!en || !fr || en.toLowerCase() === fr.toLowerCase()) continue;
+      if (en.trim().length <= 1) continue;                          // single-char noise (e.g. "-" × 15k)
       if (wc(en) < 2 || wc(en) > MongoTM.TM_WORD_LIMIT) continue;
       const ratio = wc(fr) / wc(en);
       if (ratio < 0.4 || ratio > 3.5) continue;

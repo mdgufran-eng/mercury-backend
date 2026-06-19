@@ -14,6 +14,7 @@ export async function createIndexes(db: Db): Promise<void> {
     Collections.segments(db).createIndex({ segmentId: 1 }, { unique: true }),
     Collections.segments(db).createIndex({ jobId: 1 }),
     Collections.segments(db).createIndex({ projectId: 1 }),
+    Collections.segments(db).createIndex({ state: 1, updatedAt: 1 }), // training-data export
 
 Collections.callbackLogs(db).createIndex({ projectId: 1 }),
     Collections.callbackLogs(db).createIndex({ success: 1 }),

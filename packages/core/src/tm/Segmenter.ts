@@ -6,6 +6,7 @@
 // abbreviation rules prevents incorrect splits on "Dr.", "No. 6 Dock", "approx.", etc.
 
 import sbd from 'sbd';
+import { INLINE_TAG_RE as _INLINE_TAG_RE } from './MongoTM.js';
 
 export interface ExtractedSegment {
   id: string; // `${fieldKey}::${sentenceIndex}`
@@ -16,9 +17,9 @@ export interface ExtractedSegment {
   wordCount: number;
 }
 
-// Order matters: HTML > double-brace > single-brace variable > printf
-const INLINE_TAG_RE =
-  /<[^>]+?>|<!--[\s\S]*?-->|\{\{[^}]+\}\}|\{[a-zA-Z_][^}]*\}|%[sdife]/g;
+// Single source of truth — imported from MongoTM so both files use identical pattern.
+// Aliased to a local name so callers inside this file stay unchanged.
+const INLINE_TAG_RE = _INLINE_TAG_RE;
 
 function extractTags(text: string): { tagged: string; tags: Record<string, string> } {
   const tags: Record<string, string> = {};

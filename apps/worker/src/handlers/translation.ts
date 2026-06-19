@@ -61,6 +61,8 @@ export async function handleTranslation(
 
   if (rawCache && Object.keys(rawCache).length > 0) {
     for (const seg of segments) {
+      // Match the segment.sourceHash stored in MongoDB (raw SHA-256 of normalized source).
+      // This is intentionally different from MongoTM.sourceHash() — they're independent systems.
       const hash = createHash('sha256').update(seg.source.trim().replace(/\s+/g, ' ')).digest('hex');
       const cached = rawCache[hash];
       if (cached) cachedHits.set(seg.id, cached);
