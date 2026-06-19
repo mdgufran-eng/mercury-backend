@@ -402,9 +402,9 @@ const xtmProjectRoutes: FastifyPluginAsync = async (fastify) => {
       const jobsInReanalysis: Array<{ id: number }> = [];
 
       for (const job of jobs) {
-        // Snapshot existing translations before clearing so worker skips unchanged sentences
+        // Snapshot approved translations before clearing so worker skips only human-vetted sentences.
         const existingSegs = await Collections.segments(db)
-          .find({ jobId: job.jobId, state: { $in: ['TRANSLATED', 'APPROVED'] } })
+          .find({ jobId: job.jobId, state: 'APPROVED' })
           .toArray();
         const segmentCache: Record<string, string> = {};
         for (const s of existingSegs) {

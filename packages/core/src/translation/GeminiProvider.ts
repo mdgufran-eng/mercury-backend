@@ -3,7 +3,7 @@ import type { TranslationProvider, TranslationSegment, TranslationResult } from 
 const GEMINI_API_KEY = process.env['GEMINI_API_KEY'] ?? '';
 const GEMINI_MODEL = process.env['GEMINI_MODEL'] ?? 'gemini-2.5-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-const TIMEOUT_MS = 60_000;
+const TIMEOUT_MS = 180_000;
 
 export class GeminiProvider implements TranslationProvider {
   readonly name = 'gemini';
@@ -43,6 +43,11 @@ export class GeminiProvider implements TranslationProvider {
       const results = JSON.parse(rawText) as Array<{ id: string; text: string }>;
 
       return results.map((r) => ({ id: r.id, text: r.text, confidence: 0.9 }));
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error(`Gemini API timed out after ${TIMEOUT_MS}ms`);
+      }
+      throw err;
     } finally {
       clearTimeout(timer);
     }

@@ -8,6 +8,7 @@ packages/core/src/**/*.d.ts
 packages/core/src/**/*.js.map
 *.log
 .DS_Store
+.idea/
 coverage/
 .nyc_output/
 __pycache__/

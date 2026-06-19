@@ -6,6 +6,9 @@
 // abbreviation rules prevents incorrect splits on "Dr.", "No. 6 Dock", "approx.", etc.
 
 import sbd from 'sbd';
+import { parseDocument } from 'htmlparser2';
+import render from 'dom-serializer';
+import type { AnyNode, Element } from 'domhandler';
 import { INLINE_TAG_RE as _INLINE_TAG_RE } from './MongoTM.js';
 
 export interface ExtractedSegment {
@@ -15,6 +18,8 @@ export interface ExtractedSegment {
   source: string; // tagged form — {N} placeholders in place of inline tags
   tags: Record<string, string>; // "1" → "<b>", "2" → "</b>", etc.
   wordCount: number;
+  kind?: 'plain' | 'htmlBlock';
+  htmlPath?: number[];
 }
 
 // Single source of truth — imported from MongoTM so both files use identical pattern.
@@ -41,6 +46,15 @@ function countWords(text: string): number {
   return text.replace(/\{(\d+)\}/g, '').trim().split(/\s+/).filter(Boolean).length;
 }
 
+function isTranslatableString(text: string): boolean {
+  const normalized = text.trim();
+  if (!/[a-zA-Z]/.test(normalized)) return false;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized)) {
+    return false;
+  }
+  return true;
+}
+
 // Recursively collect all leaf string values from a JSON object.
 function collectStrings(
   value: unknown,
@@ -48,7 +62,7 @@ function collectStrings(
   out: Array<{ key: string; value: string }>,
 ): void {
   if (typeof value === 'string') {
-    if (value.trim().length > 0) out.push({ key: prefix, value });
+    if (isTranslatableString(value)) out.push({ key: prefix, value });
     return;
   }
   if (Array.isArray(value)) {
@@ -95,7 +109,7 @@ const TRAVEL_ABBREVIATIONS = [
 
 const SBD_OPTIONS: sbd.Options = {
   newline_boundaries: true,        // split on newlines (good for bullet lists)
-  html_boundaries: false,          // we handle HTML ourselves via tag extraction
+  html_boundaries: false,          // we handle HTML ourselves via parser-backed block extraction
   sanitize: false,
   allowed_tags: false as const,
   abbreviations: TRAVEL_ABBREVIATIONS,
@@ -108,6 +122,109 @@ function splitSentences(text: string): string[] {
     .filter((s: string) => s.trim().length > 0);
 }
 
+const HTML_RE = /<\/?[a-z][\s\S]*>/i;
+const HTML_BLOCK_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li']);
+
+function isHtmlString(text: string): boolean {
+  return HTML_RE.test(text);
+}
+
+function isElement(node: AnyNode): node is Element {
+  return node.type === 'tag' || node.type === 'script' || node.type === 'style';
+}
+
+function isHtmlBlock(node: AnyNode): node is Element {
+  return isElement(node) && HTML_BLOCK_TAGS.has(node.name.toLowerCase());
+}
+
+function childNodes(node: AnyNode): AnyNode[] {
+  return isElement(node) ? node.children : [];
+}
+
+function innerHtml(node: Element): string {
+  return render(node.children, { decodeEntities: false });
+}
+
+function textContent(node: AnyNode): string {
+  if (node.type === 'text') return node.data;
+  return childNodes(node).map(textContent).join('');
+}
+
+function collectHtmlBlocks(
+  nodes: AnyNode[],
+  parentPath: number[],
+  out: Array<{ path: number[]; html: string }>,
+): void {
+  nodes.forEach((node, index) => {
+    const path = [...parentPath, index];
+    if (isHtmlBlock(node)) {
+      const text = textContent(node);
+      const html = innerHtml(node).trim();
+      if (isTranslatableString(text) && html.length > 0 && text.trim().toLowerCase() !== 'undefined') {
+        out.push({ path, html });
+      }
+      return;
+    }
+    collectHtmlBlocks(childNodes(node), path, out);
+  });
+}
+
+function getNodeAtPath(nodes: AnyNode[], path: number[]): AnyNode | undefined {
+  let currentNodes = nodes;
+  let current: AnyNode | undefined;
+
+  for (const index of path) {
+    current = currentNodes[index];
+    if (!current) return undefined;
+    currentNodes = childNodes(current);
+  }
+
+  return current;
+}
+
+function parseHtmlFragment(html: string): AnyNode[] {
+  return parseDocument(html, { decodeEntities: false }).children;
+}
+
+function extractHtmlSegments(fieldKey: string, value: string): ExtractedSegment[] {
+  const doc = parseDocument(value, { decodeEntities: false });
+  const blocks: Array<{ path: number[]; html: string }> = [];
+  collectHtmlBlocks(doc.children, [], blocks);
+
+  return blocks.map((block, index) => {
+    const { tagged, tags } = extractTags(block.html);
+    return {
+      id: `${fieldKey}::html::${index}`,
+      fieldKey,
+      sentenceIndex: index,
+      source: tagged,
+      tags,
+      wordCount: countWords(tagged),
+      kind: 'htmlBlock' as const,
+      htmlPath: block.path,
+    };
+  });
+}
+
+function reassembleHtml(
+  sourceHtml: string,
+  segments: ExtractedSegment[],
+  translations: Map<string, string>,
+): string {
+  const doc = parseDocument(sourceHtml, { decodeEntities: false });
+
+  for (const seg of segments) {
+    if (!seg.htmlPath) continue;
+    const node = getNodeAtPath(doc.children, seg.htmlPath);
+    if (!node || !isElement(node)) continue;
+
+    const translatedTagged = translations.get(seg.id) ?? seg.source;
+    node.children = parseHtmlFragment(expandTags(translatedTagged, seg.tags));
+  }
+
+  return render(doc.children, { decodeEntities: false });
+}
+
 // Extract all translatable segments from a JSON source object.
 export function extract(source: Record<string, unknown>): ExtractedSegment[] {
   const leaves: Array<{ key: string; value: string }> = [];
@@ -116,6 +233,11 @@ export function extract(source: Record<string, unknown>): ExtractedSegment[] {
   const segments: ExtractedSegment[] = [];
 
   for (const { key, value } of leaves) {
+    if (isHtmlString(value)) {
+      segments.push(...extractHtmlSegments(key, value));
+      continue;
+    }
+
     const sentences = splitSentences(value);
     sentences.forEach((sentence, sentenceIndex) => {
       if (!sentence.trim()) return;
@@ -127,6 +249,7 @@ export function extract(source: Record<string, unknown>): ExtractedSegment[] {
         source: tagged,
         tags,
         wordCount: countWords(tagged),
+        kind: 'plain',
       });
     });
   }
@@ -153,6 +276,8 @@ export function reassemble(
   const fieldValues = new Map<string, string>();
   for (const [fieldKey, segs] of byField) {
     segs.sort((a, b) => a.sentenceIndex - b.sentenceIndex);
+    if (segs.some((seg) => seg.kind === 'htmlBlock')) continue;
+
     const parts = segs.map((seg) => {
       const translatedTagged = translations.get(seg.id) ?? seg.source;
       return expandTags(translatedTagged, seg.tags);
@@ -164,6 +289,10 @@ export function reassemble(
   // replacing strings using the exact same key that was collected.
   function replaceIn(value: unknown, prefix: string): unknown {
     if (typeof value === 'string') {
+      const htmlSegments = byField.get(prefix)?.filter((seg) => seg.kind === 'htmlBlock') ?? [];
+      if (htmlSegments.length > 0) {
+        return reassembleHtml(value, htmlSegments, translations);
+      }
       return fieldValues.get(prefix) ?? value;
     }
     if (Array.isArray(value)) {

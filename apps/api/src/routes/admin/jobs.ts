@@ -111,12 +111,27 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
       if (files.length === 0) return reply.status(400).send({ error: 'No files provided' });
 
       const now = new Date();
-      const created: Array<{ jobId: number; fileName: string }> = [];
+      const created: Array<{ jobId: number; fileName: string; action: 'created' | 'replaced' }> = [];
 
       for (const f of files) {
         const sourceHash = createHash('sha256').update(f.buffer).digest('hex');
         let sourceContent: Record<string, unknown> = {};
         try { sourceContent = JSON.parse(f.buffer.toString('utf-8')); } catch { /* non-JSON */ }
+
+        const existing = await Collections.jobs(db).findOne({ projectId, fileName: f.filename });
+        if (existing) {
+          await resetAndEnqueueJob(fastify.broker, db, {
+            projectId,
+            jobId: existing.jobId,
+            sourceLanguage: project.sourceLanguage,
+            targetLanguage: project.targetLanguage,
+            sourceHash,
+            sourceContent,
+            now,
+          });
+          created.push({ jobId: existing.jobId, fileName: f.filename, action: 'replaced' });
+          continue;
+        }
 
         const jobId = await nextId(db, 'job');
         const job: import('@mercury/core').Job = {
@@ -139,7 +154,7 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
           sourceLanguage: project.sourceLanguage,
           targetLanguage: project.targetLanguage,
         });
-        created.push({ jobId, fileName: f.filename });
+        created.push({ jobId, fileName: f.filename, action: 'created' });
       }
 
       // Update project status to ACTIVE if still CREATED
@@ -151,6 +166,33 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return reply.status(201).send({ projectId, jobs: created });
+    },
+  );
+
+  // POST /admin/api/projects/:projectId/jobs/:jobId/retry — reset generated state and re-enqueue
+  fastify.post<{ Params: { projectId: string; jobId: string } }>(
+    '/admin/api/projects/:projectId/jobs/:jobId/retry',
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const jobId = parseInt(request.params.jobId, 10);
+      const db = fastify.mongo;
+
+      const [project, job] = await Promise.all([
+        Collections.projects(db).findOne({ projectId }),
+        Collections.jobs(db).findOne({ projectId, jobId }),
+      ]);
+
+      if (!project || !job) return reply.status(404).send({ error: 'Project or job not found' });
+
+      await resetAndEnqueueJob(fastify.broker, db, {
+        projectId,
+        jobId,
+        sourceLanguage: project.sourceLanguage,
+        targetLanguage: project.targetLanguage,
+        now: new Date(),
+      });
+
+      return reply.send({ success: true, projectId, jobId });
     },
   );
 
@@ -361,6 +403,47 @@ async function fireCallback(
     method: req.method,
     headers: req.headers,
     body: req.body,
+  });
+}
+
+async function resetAndEnqueueJob(
+  broker: import('@mercury/core').MessageBroker,
+  db: import('mongodb').Db,
+  opts: {
+    projectId: number;
+    jobId: number;
+    sourceLanguage: string;
+    targetLanguage: string;
+    now: Date;
+    sourceHash?: string;
+    sourceContent?: Record<string, unknown>;
+  },
+): Promise<void> {
+  const set: Record<string, unknown> = {
+    status: 'CREATED',
+    billableWords: 0,
+    updatedAt: opts.now,
+  };
+  if (opts.sourceHash !== undefined) set['sourceHash'] = opts.sourceHash;
+  if (opts.sourceContent !== undefined) set['sourceContent'] = opts.sourceContent;
+
+  await Collections.segments(db).deleteMany({ jobId: opts.jobId });
+  await Collections.jobs(db).updateOne(
+    { projectId: opts.projectId, jobId: opts.jobId },
+    {
+      $set: set,
+      $unset: { targetContent: '', segmentCache: '', completedAt: '' },
+    },
+  );
+  await Collections.projects(db).updateOne(
+    { projectId: opts.projectId },
+    { $set: { status: 'CREATED', updatedAt: opts.now } },
+  );
+  await broker.enqueueTranslate({
+    projectId: opts.projectId,
+    jobId: opts.jobId,
+    sourceLanguage: opts.sourceLanguage,
+    targetLanguage: opts.targetLanguage,
   });
 }
 

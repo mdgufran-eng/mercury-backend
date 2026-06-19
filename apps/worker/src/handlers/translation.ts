@@ -23,7 +23,35 @@ export async function handleTranslation(
 ): Promise<void> {
   const { projectId, jobId } = job.data;
 
+  try {
+    await processTranslation(job, db, broker);
+  } catch (err) {
+    const maxAttempts = typeof job.opts.attempts === 'number' ? job.opts.attempts : 1;
+    const isFinalAttempt = job.attemptsMade + 1 >= maxAttempts;
+
+    if (isFinalAttempt) {
+      await Collections.jobs(db).updateOne(
+        { jobId },
+        { $set: { status: 'FAILED', updatedAt: new Date() } },
+      );
+      await Collections.projects(db).updateOne(
+        { projectId },
+        { $set: { status: 'FAILED', updatedAt: new Date() } },
+      );
+    }
+    throw err;
+  }
+}
+
+async function processTranslation(
+  job: Job<TranslateJobData>,
+  db: Db,
+  broker: MessageBroker,
+): Promise<void> {
+  const { projectId, jobId } = job.data;
+
   const { project, job: jobDoc } = await fetchProjectAndJob(db, projectId, jobId);
+  rejectMercuryTargetFileAsSource(jobDoc.sourceContent);
 
   // Idempotency: skip if this job was already processed (worker retry after crash).
   if (jobDoc.status === 'FINISHED') {
@@ -35,6 +63,15 @@ export async function handleTranslation(
     job.log(`Job ${jobId} already has ${existingSegments} segments — skipping duplicate`);
     return;
   }
+
+  await Collections.jobs(db).updateOne(
+    { jobId },
+    { $set: { status: 'IN_PROGRESS', updatedAt: new Date() } },
+  );
+  await Collections.projects(db).updateOne(
+    { projectId, status: { $ne: 'FAILED' } },
+    { $set: { status: 'IN_PROGRESS', updatedAt: new Date() } },
+  );
 
   const { segments, sourceContent } = await segmentJob(jobDoc);
 
@@ -107,4 +144,23 @@ export async function handleTranslation(
   job.log(
     `Done: ${segments.length} segs — ${tmHits.size} TM hits (free) + ${cachedHits.size - tmHits.size} cache hits + ${afterTM.length} ML translated — ${billableWords} billable words`,
   );
+}
+
+function rejectMercuryTargetFileAsSource(sourceContent: unknown): void {
+  if (sourceContent === null || typeof sourceContent !== 'object') return;
+
+  const metadata = (sourceContent as Record<string, unknown>)['metadata'];
+  if (metadata === null || typeof metadata !== 'object') return;
+
+  const record = metadata as Record<string, unknown>;
+  const hasMercuryDownloadMetadata =
+    typeof record['jobId'] === 'number' &&
+    typeof record['projectId'] === 'number' &&
+    typeof record['fileName'] === 'string' &&
+    typeof record['sourceLanguage'] === 'string' &&
+    typeof record['targetLanguage'] === 'string';
+
+  if (hasMercuryDownloadMetadata) {
+    throw new Error('Refusing to translate a Mercury target download as a source file. Upload the original source JSON instead.');
+  }
 }

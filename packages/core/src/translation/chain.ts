@@ -1,31 +1,19 @@
 import { OwnModelProvider } from './OwnModelProvider.js';
-import { GeminiProvider } from './GeminiProvider.js';
 import type { TranslationProvider, TranslationSegment, TranslationResult } from './TranslationProvider.js';
 
-const MIN_CONFIDENCE = parseFloat(process.env['MIN_TRANSLATION_CONFIDENCE'] ?? '0.7');
-
-// Tries OwnModel first; falls back to Gemini on failure or low confidence.
+// Own model only — Gemini fallback disabled for testing.
+// Re-enable by uncommenting the GeminiProvider import and fallback block below.
 export async function translateWithFallback(
   segments: TranslationSegment[],
   sourceLang: string,
   targetLang: string,
 ): Promise<TranslationResult[]> {
   const own = new OwnModelProvider();
-  const gemini = new GeminiProvider();
-
-  let ownResults: TranslationResult[] | null = null;
-
-  try {
-    ownResults = await own.translate(segments, sourceLang, targetLang);
-  } catch {
-    // own model unavailable — fall through to Gemini entirely
-  }
-
-  // Own model available — use its results directly, no Gemini fallback.
-  if (ownResults) return ownResults;
-
-  // Own model unavailable — fall back to Gemini entirely.
-  return gemini.translate(segments, sourceLang, targetLang);
+  return own.translate(segments, sourceLang, targetLang);
 }
+
+// To re-enable Gemini fallback:
+// import { GeminiProvider } from './GeminiProvider.js';
+// try { return await own.translate(...) } catch { return gemini.translate(...) }
 
 export type { TranslationProvider, TranslationSegment, TranslationResult };

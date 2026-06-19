@@ -16,6 +16,10 @@ function extractTagSet(text: string): Set<string> {
   return tags;
 }
 
+function extractTagSequence(text: string): string[] {
+  return [...text.matchAll(TAG_RE)].map((m) => m[1]!);
+}
+
 export function runQA(source: string, target: string): QAResult {
   const errors: QAError[] = [];
 
@@ -40,6 +44,25 @@ export function runQA(source: string, target: string): QAResult {
     errors.push({
       code: 'EXTRA_TAGS',
       message: `Tags in target not present in source: {${extra.join('}, {')}}`,
+    });
+  }
+
+  const sourceTagSequence = extractTagSequence(source);
+  const targetTagSequence = extractTagSequence(target);
+  if (
+    sourceTagSequence.length !== targetTagSequence.length ||
+    sourceTagSequence.some((tag, index) => targetTagSequence[index] !== tag)
+  ) {
+    errors.push({
+      code: 'TAG_SEQUENCE',
+      message: `Target tags must preserve source tag order and count exactly`,
+    });
+  }
+
+  if (sourceTags.size > 0 && /<[^>]+?>|<!--[\s\S]*?-->/.test(target)) {
+    errors.push({
+      code: 'RAW_HTML_TAGS',
+      message: 'Target contains raw HTML even though source HTML was represented as placeholders',
     });
   }
 

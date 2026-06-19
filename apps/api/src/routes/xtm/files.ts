@@ -66,7 +66,7 @@ const xtmFileRoutes: FastifyPluginAsync = async (fastify) => {
           if (existing.sourceHash !== sourceHash) {
             // Snapshot existing translations before clearing so worker reuses unchanged sentences (Fix 5)
             const existingSegs = await Collections.segments(db)
-              .find({ jobId: existing.jobId, state: { $in: ['TRANSLATED', 'APPROVED'] } })
+              .find({ jobId: existing.jobId, state: 'APPROVED' })
               .toArray();
             const segmentCache: Record<string, string> = {};
             for (const s of existingSegs) {
@@ -235,7 +235,7 @@ const xtmFileRoutes: FastifyPluginAsync = async (fastify) => {
     const now = new Date();
     for (const job of jobs) {
       const existingSegs = await Collections.segments(db)
-        .find({ jobId: job.jobId, state: { $in: ['TRANSLATED', 'APPROVED'] } })
+        .find({ jobId: job.jobId, state: 'APPROVED' })
         .toArray();
       const segmentCache: Record<string, string> = {};
       for (const s of existingSegs) {

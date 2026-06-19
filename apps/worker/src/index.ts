@@ -46,7 +46,7 @@ async function start() {
   function attachListeners(worker: Worker, name: string): void {
     worker.on('completed', (job) => console.log(`[${name}] Job ${job.id} completed`));
     worker.on('failed', (job, err) =>
-      console.error(`[${name}] Job ${job?.id} failed:`, err.message),
+      console.error(`[${name}] Job ${job?.id} failed:`, err.stack ?? err.message),
     );
     worker.on('error', (err) => console.error(`[${name}] Worker error:`, err));
   }

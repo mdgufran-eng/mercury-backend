@@ -18,7 +18,9 @@ import { createHash } from 'crypto';
 import { Db } from 'mongodb';
 import { Collections, nextId, nextIdRange } from '../index.js';
 import { Segmenter } from '../index.js';
+import { runQA } from '../tm/qa.js';
 import { translateWithFallback } from '../translation/chain.js';
+import { GeminiProvider } from '../translation/GeminiProvider.js';
 import {
   buildJobFinishedWebhook,
   buildProjectCompletionWebhook,
@@ -75,7 +77,48 @@ export async function translateMisses(
     sourceLanguage,
     targetLanguage,
   );
-  return new Map(results.map((r) => [r.id, r.text]));
+  const byId = new Map(results.map((r) => [r.id, r.text]));
+  let invalid = validateTranslations(misses, byId);
+
+  const geminiFallbackEnabled = process.env['ENABLE_GEMINI_FALLBACK'] === 'true';
+
+  if (invalid.length > 0 && geminiFallbackEnabled && process.env['GEMINI_API_KEY']) {
+    const gemini = new GeminiProvider();
+    const retrySegments = invalid.map(({ segment }) => ({ id: segment.id, text: segment.source }));
+    const retryResults = await gemini.translate(retrySegments, sourceLanguage, targetLanguage);
+    for (const result of retryResults) {
+      byId.set(result.id, result.text);
+    }
+    invalid = validateTranslations(misses, byId);
+  }
+
+  return byId;
+}
+
+function validateTranslations(
+  misses: ReturnType<typeof Segmenter.extract>,
+  translations: Map<string, string>,
+): Array<{ segment: ReturnType<typeof Segmenter.extract>[number]; errors: string[] }> {
+  const invalid: Array<{ segment: ReturnType<typeof Segmenter.extract>[number]; errors: string[] }> = [];
+
+  for (const segment of misses) {
+    const target = translations.get(segment.id);
+    if (target === undefined) {
+      invalid.push({ segment, errors: ['MISSING_RESULT'] });
+      continue;
+    }
+
+    const qa = runQA(segment.source, target);
+    const errors = qa.errors.map((e) => e.code);
+    if (segment.kind === 'htmlBlock' && /<[^>]+?>|<!--[\s\S]*?-->/.test(target)) {
+      errors.push('RAW_HTML_TAGS');
+    }
+    if (errors.length > 0) {
+      invalid.push({ segment, errors });
+    }
+  }
+
+  return invalid;
 }
 
 // ── Activity: persist segments to DB + count billable words ──────────────────
