@@ -64,6 +64,15 @@ const xtmFileRoutes: FastifyPluginAsync = async (fastify) => {
 
         if (existing) {
           if (existing.sourceHash !== sourceHash) {
+            // Snapshot existing translations before clearing so worker reuses unchanged sentences (Fix 5)
+            const existingSegs = await Collections.segments(db)
+              .find({ jobId: existing.jobId, state: { $in: ['TRANSLATED', 'APPROVED'] } })
+              .toArray();
+            const segmentCache: Record<string, string> = {};
+            for (const s of existingSegs) {
+              if (s.target) segmentCache[s.sourceHash] = s.target;
+            }
+            await Collections.segments(db).deleteMany({ jobId: existing.jobId });
             await Collections.jobs(db).updateOne(
               { jobId: existing.jobId },
               {
@@ -74,6 +83,7 @@ const xtmFileRoutes: FastifyPluginAsync = async (fastify) => {
                   status: 'CREATED',
                   wordCount: 0,
                   billableWords: 0,
+                  segmentCache,
                   updatedAt: now,
                 },
               },
@@ -185,9 +195,37 @@ const xtmFileRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send(buffer);
   });
 
-  // PUT /:projectId/files — reanalyze (B7)
-  fastify.put<{ Params: { projectId: string } }>(`${BASE}/files`, async (_request, reply) => {
-    return reply.status(501).send({ error: 'Not Implemented', message: 'Implemented in Phase B7' });
+  // PUT /:projectId/files — reanalyze: re-translate all jobs (snapshot segment cache first)
+  fastify.put<{ Params: { projectId: string } }>(`${BASE}/files`, async (request, reply) => {
+    const projectId = parseInt(request.params.projectId, 10);
+    const db = fastify.mongo;
+    const project = await Collections.projects(db).findOne({ projectId });
+    if (!project) return reply.status(404).send({ error: 'Project not found' });
+
+    const jobs = await Collections.jobs(db).find({ projectId }).toArray();
+    const now = new Date();
+    for (const job of jobs) {
+      const existingSegs = await Collections.segments(db)
+        .find({ jobId: job.jobId, state: { $in: ['TRANSLATED', 'APPROVED'] } })
+        .toArray();
+      const segmentCache: Record<string, string> = {};
+      for (const s of existingSegs) {
+        if (s.target) segmentCache[s.sourceHash] = s.target;
+      }
+      await Collections.segments(db).deleteMany({ jobId: job.jobId });
+      await Collections.jobs(db).updateOne(
+        { jobId: job.jobId },
+        { $set: { status: 'CREATED', targetContent: undefined, billableWords: 0, segmentCache, updatedAt: now } },
+      );
+      await fastify.broker.enqueueTranslate({
+        projectId,
+        jobId: job.jobId,
+        sourceLanguage: project.sourceLanguage,
+        targetLanguage: project.targetLanguage,
+      });
+    }
+    await Collections.projects(db).updateOne({ projectId }, { $set: { status: 'CREATED', updatedAt: now } });
+    return reply.send({ success: true });
   });
 };
 

@@ -187,10 +187,22 @@ const xtmCostRoutes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  // POST /:projectId/custom-fields — update custom fields (acknowledged, CE ID set at create)
+  // POST /:projectId/custom-fields — update custom fields; stores CE ID (field 81050136) as referenceId
   fastify.post<{ Params: { projectId: string } }>(
     `${BASE}/custom-fields`,
-    async (_request, reply) => {
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const db = fastify.mongo;
+      const fields = request.body as Array<{ id: string | number; value: { value: string } }> | undefined;
+      if (Array.isArray(fields)) {
+        const ceId = fields.find((f) => String(f.id) === '81050136');
+        if (ceId?.value?.value !== undefined) {
+          await Collections.projects(db).updateOne(
+            { projectId },
+            { $set: { referenceId: ceId.value.value, updatedAt: new Date() } },
+          );
+        }
+      }
       return reply.send({ success: true });
     },
   );

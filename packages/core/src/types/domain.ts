@@ -62,6 +62,7 @@ export interface Job {
   sourceHash: string;
   sourceContent?: Record<string, unknown>;
   targetContent?: Record<string, unknown>;
+  segmentCache?: Record<string, string>;
   createdAt: Date;
   updatedAt: Date;
 }

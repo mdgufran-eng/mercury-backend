@@ -5,6 +5,7 @@ import {
   nextId,
   buildProjectCreatedWebhook,
   buildAnalysisFinishedWebhook,
+  buildActivityChangedWebhook,
 } from '@mercury/core';
 import type { Project, Job, CallbackLog, MessageBroker } from '@mercury/core';
 
@@ -198,10 +199,45 @@ const xtmProjectRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send([formatProject(proj)]);
   });
 
-  // GET /projects?ids=123,456 — get by numeric IDs
+  // GET /projects — supports ids, name, and cleanup filters (createdDateTo, customerIds, activity, page, pageSize)
   fastify.get(BASE, async (request, reply) => {
-    const query = request.query as { ids?: string; name?: string };
+    const query = request.query as {
+      ids?: string;
+      name?: string;
+      createdDateTo?: string;
+      customerIds?: string | string[];
+      activity?: string | string[];
+      page?: string;
+      pageSize?: string;
+    };
     const db = fastify.mongo;
+
+    // Rosetta's bulk cleanup cron: GET /projects?createdDateTo=&customerIds=&activity=&page=&pageSize=
+    if (query.createdDateTo || query.customerIds) {
+      const filter: Record<string, unknown> = {};
+      if (query.createdDateTo) filter['createdAt'] = { $lte: new Date(query.createdDateTo) };
+      if (query.customerIds) {
+        const ids = Array.isArray(query.customerIds)
+          ? query.customerIds.map(Number)
+          : query.customerIds.split(',').map(Number);
+        filter['customerId'] = { $in: ids };
+      }
+      if (query.activity) {
+        const acts = Array.isArray(query.activity)
+          ? query.activity
+          : query.activity.split(',');
+        filter['activity'] = { $in: acts };
+      }
+      const pageSize = Math.min(parseInt(query.pageSize ?? '1000', 10), 1000);
+      const page = Math.max(parseInt(query.page ?? '1', 10), 1);
+      const projects = await Collections.projects(db)
+        .find(filter)
+        .sort({ createdAt: 1 })
+        .skip((page - 1) * pageSize)
+        .limit(pageSize)
+        .toArray();
+      return reply.send(projects.map(formatProject));
+    }
 
     if (query.ids) {
       const ids = query.ids
@@ -283,11 +319,22 @@ const xtmProjectRoutes: FastifyPluginAsync = async (fastify) => {
     `${BASE}/:projectId/activate`,
     async (request, reply) => {
       const projectId = parseInt(request.params.projectId, 10);
-      const result = await Collections.projects(fastify.mongo).updateOne(
+      const db = fastify.mongo;
+      const result = await Collections.projects(db).updateOne(
         { projectId },
         { $set: { activity: 'ACTIVE', updatedAt: new Date() } },
       );
       if (result.matchedCount === 0) return reply.status(404).send({ error: 'Project not found' });
+      const proj = await Collections.projects(db).findOne({ projectId });
+      if (proj?.callbackUrls?.projectActivityChanged) {
+        await fireCallback(db, fastify.broker, {
+          projectId,
+          customerId: proj.customerId,
+          event: 'project-activity-changed',
+          url: proj.callbackUrls.projectActivityChanged,
+          build: () => buildActivityChangedWebhook(proj.callbackUrls.projectActivityChanged!, projectId, 'ACTIVE'),
+        });
+      }
       return reply.send({ success: true });
     },
   );
@@ -295,11 +342,22 @@ const xtmProjectRoutes: FastifyPluginAsync = async (fastify) => {
   // DELETE /projects/:projectId — soft delete
   fastify.delete<{ Params: { projectId: string } }>(`${BASE}/:projectId`, async (request, reply) => {
     const projectId = parseInt(request.params.projectId, 10);
-    const result = await Collections.projects(fastify.mongo).updateOne(
+    const db = fastify.mongo;
+    const proj = await Collections.projects(db).findOne({ projectId });
+    if (!proj) return reply.status(404).send({ error: 'Project not found' });
+    await Collections.projects(db).updateOne(
       { projectId },
       { $set: { activity: 'DELETED', status: 'FAILED', updatedAt: new Date() } },
     );
-    if (result.matchedCount === 0) return reply.status(404).send({ error: 'Project not found' });
+    if (proj.callbackUrls?.projectActivityChanged) {
+      await fireCallback(db, fastify.broker, {
+        projectId,
+        customerId: proj.customerId,
+        event: 'project-activity-changed',
+        url: proj.callbackUrls.projectActivityChanged,
+        build: () => buildActivityChangedWebhook(proj.callbackUrls.projectActivityChanged!, projectId, 'DELETED'),
+      });
+    }
     return reply.send({ success: true });
   });
 
@@ -322,6 +380,55 @@ const xtmProjectRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return reply.send({ linguists, projectManager: system, projectCreator: system });
+    },
+  );
+
+  // POST /projects/:projectId/reanalyze — re-translate all jobs using current model
+  // Snapshots existing translations as a segment cache so unchanged sentences are free.
+  fastify.post<{ Params: { projectId: string } }>(
+    `${BASE}/:projectId/reanalyze`,
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const db = fastify.mongo;
+
+      const project = await Collections.projects(db).findOne({ projectId });
+      if (!project) return reply.status(404).send({ error: 'Project not found' });
+      if (project.activity === 'DELETED') return reply.send({ success: false });
+
+      const jobs = await Collections.jobs(db).find({ projectId }).toArray();
+      const now = new Date();
+      const jobsInReanalysis: Array<{ id: number }> = [];
+
+      for (const job of jobs) {
+        // Snapshot existing translations before clearing so worker skips unchanged sentences
+        const existingSegs = await Collections.segments(db)
+          .find({ jobId: job.jobId, state: { $in: ['TRANSLATED', 'APPROVED'] } })
+          .toArray();
+        const segmentCache: Record<string, string> = {};
+        for (const s of existingSegs) {
+          if (s.target) segmentCache[s.sourceHash] = s.target;
+        }
+
+        await Collections.segments(db).deleteMany({ jobId: job.jobId });
+        await Collections.jobs(db).updateOne(
+          { jobId: job.jobId },
+          { $set: { status: 'CREATED', targetContent: undefined, billableWords: 0, segmentCache, updatedAt: now } },
+        );
+        await fastify.broker.enqueueTranslate({
+          projectId,
+          jobId: job.jobId,
+          sourceLanguage: project.sourceLanguage,
+          targetLanguage: project.targetLanguage,
+        });
+        jobsInReanalysis.push({ id: job.jobId });
+      }
+
+      await Collections.projects(db).updateOne(
+        { projectId },
+        { $set: { status: 'CREATED', updatedAt: now } },
+      );
+
+      return reply.send({ success: true, jobsInReanalysis });
     },
   );
 };

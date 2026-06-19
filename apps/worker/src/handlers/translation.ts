@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { Job } from 'bullmq';
 import { Db } from 'mongodb';
 import {
@@ -43,7 +44,6 @@ export async function handleTranslation(
     return;
   }
 
-  // MACHINE: all segments go to own model (no TM pre-lookup)
   if (segments.length === 0) {
     job.log('No translatable segments — marking job finished');
     await finaliseJob(db, jobId, projectId, sourceContent, [], new Map(), 0);
@@ -53,16 +53,41 @@ export async function handleTranslation(
 
   const { sourceLanguage, targetLanguage } = project;
 
-  const mtMap = await translateMisses(segments, sourceLanguage, targetLanguage);
+  // Fix 5: reuse cached translations for unchanged segments (set by reanalyze/re-upload).
+  // segmentCache maps sourceHash → previous target so unchanged sentences skip ML entirely.
+  const rawCache = (jobDoc as unknown as Record<string, unknown>)['segmentCache'] as Record<string, string> | undefined;
+  const cachedHits = new Map<string, string>(); // segId → cached target
+  const needsML: typeof segments = [];
+
+  if (rawCache && Object.keys(rawCache).length > 0) {
+    for (const seg of segments) {
+      const hash = createHash('sha256').update(seg.source.trim().replace(/\s+/g, ' ')).digest('hex');
+      const cached = rawCache[hash];
+      if (cached) {
+        cachedHits.set(seg.id, cached);
+      } else {
+        needsML.push(seg);
+      }
+    }
+    // Clear cache after use — it's a one-shot operational field
+    await Collections.jobs(db).updateOne({ jobId }, { $unset: { segmentCache: '' } });
+    job.log(`Segment cache: ${cachedHits.size} reused, ${needsML.length} to translate`);
+  } else {
+    needsML.push(...segments);
+  }
+
+  const mtMap = await translateMisses(needsML, sourceLanguage, targetLanguage);
 
   const { billableWords, targetMap } = await persistSegments(
     db, jobId, projectId, segments,
-    new Map(), // no TM hits — all segments are MT
+    cachedHits, // treated as ICE hits — free, no ML cost
     mtMap,
   );
 
   await finaliseJob(db, jobId, projectId, sourceContent, segments, targetMap, billableWords);
   await fireJobCallbacks(db, broker, project, jobId);
 
-  job.log(`Done: ${segments.length} segments translated, ${billableWords} billable words`);
+  job.log(
+    `Done: ${segments.length} segments, ${cachedHits.size} cached (ICE), ${needsML.length} translated (MT), ${billableWords} billable words`,
+  );
 }
