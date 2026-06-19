@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import JSZip from 'jszip';
-import { Collections, nextId } from '@mercury/core';
+import { Collections, nextId, buildSourceFileUpdatedWebhook } from '@mercury/core';
 import type { Job } from '@mercury/core';
 import { createHash } from 'crypto';
 
@@ -94,6 +94,35 @@ const xtmFileRoutes: FastifyPluginAsync = async (fastify) => {
               sourceLanguage: project.sourceLanguage,
               targetLanguage: project.targetLanguage,
             });
+            if (project.callbackUrls?.sourceFileUpdated) {
+              const req = buildSourceFileUpdatedWebhook(project.callbackUrls.sourceFileUpdated, projectId);
+              const callbackId = await nextId(db, 'callback');
+              await Collections.callbackLogs(db).insertOne({
+                callbackId,
+                projectId,
+                jobId: existing.jobId,
+                event: 'source-file-updated',
+                url: req.url,
+                method: req.method,
+                headers: req.headers,
+                body: req.body,
+                payload: {},
+                attempts: 0,
+                success: false,
+                createdAt: now,
+              });
+              await broker.enqueueWebhook({
+                callbackId,
+                projectId,
+                jobId: existing.jobId,
+                customerId: project.customerId,
+                event: 'source-file-updated',
+                url: req.url,
+                method: req.method,
+                headers: req.headers,
+                body: req.body,
+              });
+            }
           }
           jobResults.push({ jobId: existing.jobId, fileName: f.filename, action: 'replaced' });
         } else {

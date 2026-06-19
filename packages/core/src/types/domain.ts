@@ -36,6 +36,7 @@ export interface Project {
   completionStatus?: string;
   referenceId?: string;
   description?: string;
+  poNumber?: string;
   freelancerId?: number;
   callbackUrls: {
     projectCreated?: string;
@@ -65,6 +66,7 @@ export interface Job {
   segmentCache?: Record<string, string>;
   createdAt: Date;
   updatedAt: Date;
+  completedAt?: Date;
 }
 
 export interface Segment {

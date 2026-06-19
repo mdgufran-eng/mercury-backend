@@ -155,6 +155,7 @@ const xtmProjectRoutes: FastifyPluginAsync = async (fastify) => {
       event: 'project-created',
       url: callbackUrls.projectCreated,
       build: () => buildProjectCreatedWebhook(callbackUrls.projectCreated!, projectId),
+      payload: { xtmProjectId: projectId },
     });
     await fireCallback(db, broker, {
       projectId,
@@ -162,6 +163,7 @@ const xtmProjectRoutes: FastifyPluginAsync = async (fastify) => {
       event: 'analysis-finished',
       url: callbackUrls.analysisFinished,
       build: () => buildAnalysisFinishedWebhook(callbackUrls.analysisFinished!, projectId),
+      payload: { xtmProjectId: projectId },
     });
 
     // Enqueue ALL projects — worker segments HUMAN jobs, translates MACHINE jobs.
@@ -452,6 +454,7 @@ async function fireCallback(
     event: CallbackLog['event'];
     url: string | undefined;
     build: () => import('@mercury/core').WebhookRequest;
+    payload?: Record<string, unknown>;
   },
 ): Promise<void> {
   if (!opts.url) return;
@@ -468,7 +471,7 @@ async function fireCallback(
     method: req.method,
     headers: req.headers,
     body: req.body,
-    payload: {},
+    payload: opts.payload ?? {},
     attempts: 0,
     success: false,
     createdAt: now,

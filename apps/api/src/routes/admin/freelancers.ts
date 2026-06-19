@@ -18,7 +18,12 @@ const adminFreelancerRoutes: FastifyPluginAsync = async (fastify) => {
       Collections.freelancers(db).countDocuments(filter),
     ]);
 
-    return reply.send({ data, total, limit, skip });
+    return reply.send({
+      data: data.map((f) => ({ ...f, langs: f.languages })),
+      total,
+      limit,
+      skip,
+    });
   });
 
   // POST /admin/api/freelancers — create freelancer

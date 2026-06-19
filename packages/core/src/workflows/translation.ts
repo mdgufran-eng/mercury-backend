@@ -191,12 +191,15 @@ export async function fireJobCallbacks(
   const now = new Date();
 
   if (callbackUrls?.jobFinished) {
+    const job = await Collections.jobs(db).findOne({ jobId });
+    const translatedContent = job?.targetContent;
     await persistAndEnqueue(db, broker, {
       projectId,
       jobId,
       customerId,
       event: 'job-finished',
-      build: () => buildJobFinishedWebhook(callbackUrls.jobFinished!, projectId, jobId, customerId),
+      build: () => buildJobFinishedWebhook(callbackUrls.jobFinished!, projectId, jobId, customerId, translatedContent),
+      payload: { xtmProjectId: projectId, xtmJobId: jobId, xtmCustomerId: customerId, translatedContent },
       now,
     });
   }
@@ -213,6 +216,7 @@ export async function fireJobCallbacks(
       event: 'project-completion',
       build: () =>
         buildProjectCompletionWebhook(callbackUrls.projectCompletion!, projectId, customerId),
+      payload: { xtmProjectId: projectId, xtmCustomerId: customerId },
       now,
     });
   }
@@ -261,6 +265,7 @@ async function persistAndEnqueue(
     customerId: number;
     event: CallbackLog['event'];
     build: () => import('../webhooks/CallbackBuilder.js').WebhookRequest;
+    payload?: Record<string, unknown>;
     now: Date;
   },
 ): Promise<void> {
@@ -276,7 +281,7 @@ async function persistAndEnqueue(
     method: req.method,
     headers: req.headers,
     body: req.body,
-    payload: {},
+    payload: opts.payload ?? {},
     attempts: 0,
     success: false,
     createdAt: opts.now,

@@ -21,23 +21,10 @@ export async function translateWithFallback(
     // own model unavailable — fall through to Gemini entirely
   }
 
-  if (ownResults) {
-    const needsFallback = ownResults.filter((r) => r.confidence < MIN_CONFIDENCE);
-    const goodResults = ownResults.filter((r) => r.confidence >= MIN_CONFIDENCE);
+  // Own model available — use its results directly, no Gemini fallback.
+  if (ownResults) return ownResults;
 
-    if (needsFallback.length === 0) return goodResults;
-
-    // Retry low-confidence segments with Gemini
-    const fallbackSegs = segments.filter((s) =>
-      needsFallback.some((r) => r.id === s.id),
-    );
-    const fallbackResults = await gemini.translate(fallbackSegs, sourceLang, targetLang);
-
-    const merged = new Map<string, TranslationResult>(goodResults.map((r) => [r.id, r]));
-    for (const r of fallbackResults) merged.set(r.id, r);
-    return segments.map((s) => merged.get(s.id)!);
-  }
-
+  // Own model unavailable — fall back to Gemini entirely.
   return gemini.translate(segments, sourceLang, targetLang);
 }
 

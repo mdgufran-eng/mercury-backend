@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
-import { Collections } from '@mercury/core';
+import { Collections, nextId, buildProjectCreatedWebhook, buildAnalysisFinishedWebhook } from '@mercury/core';
+import type { CallbackLog, MessageBroker } from '@mercury/core';
 
 const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
   // GET /admin/api/projects?status=&method=&customerId=&limit=50&skip=0
@@ -61,6 +62,7 @@ const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
         jobCount: jobCountMap.get(p.projectId) ?? 0,
         referenceId: p.referenceId,
         description: p.description,
+        poNumber: p.poNumber ?? '',
         createdAt: p.createdAt.toISOString(),
         updatedAt: p.updatedAt.toISOString(),
       })),
@@ -102,6 +104,7 @@ const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
         templateId: String(proj.templateId),
         referenceId: proj.referenceId,
         description: proj.description,
+        poNumber: proj.poNumber ?? '',
         freelancerId: proj.freelancerId,
         callbackUrls: proj.callbackUrls,
         createdAt: proj.createdAt.toISOString(),
@@ -190,6 +193,7 @@ const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
         customerName: cMap.get(p.customerId) ?? String(p.customerId),
         sourceLang: p.sourceLanguage,
         targetLang: p.targetLanguage,
+        poNumber: p.poNumber ?? '',
         createdAt: p.createdAt.toISOString(),
         updatedAt: p.updatedAt.toISOString(),
       })),
@@ -205,6 +209,149 @@ const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
       })),
     });
   });
+  // POST /admin/api/projects — create a project from the frontend "Upload Project" modal
+  fastify.post('/admin/api/projects', async (request, reply) => {
+    const body = request.body as {
+      name: string;
+      customerId: string | number;
+      sourceLang?: string;
+      targetLang: string;
+      method: 'MACHINE' | 'HUMAN';
+      callbackUrls?: {
+        projectCreated?: string;
+        analysisFinished?: string;
+        jobFinished?: string;
+        projectCompletion?: string;
+        sourceFileUpdated?: string;
+        projectActivityChanged?: string;
+      };
+    };
+
+    const db = fastify.mongo;
+    const customerId = parseInt(String(body.customerId), 10);
+    const sourceLanguage = (body.sourceLang ?? 'EN').toUpperCase();
+    const targetLanguage = body.targetLang.toUpperCase();
+
+    // Find a matching template (method + targetLanguage), fallback to 0
+    const template = await Collections.templates(db).findOne({
+      method: body.method,
+      targetLanguage: targetLanguage.toLowerCase(),
+    });
+
+    // For HUMAN projects, auto-assign a freelancer by targetLanguage
+    let freelancerId: number | undefined;
+    if (body.method === 'HUMAN') {
+      const fl = await Collections.freelancers(db).findOne({
+        languages: targetLanguage.toLowerCase(),
+      });
+      freelancerId = fl?.freelancerId;
+    }
+
+    const projectId = await nextId(db, 'project');
+    const now = new Date();
+
+    const callbackUrls: import('@mercury/core').Project['callbackUrls'] = {
+      projectCreated:         body.callbackUrls?.projectCreated         || undefined,
+      analysisFinished:       body.callbackUrls?.analysisFinished       || undefined,
+      jobFinished:            body.callbackUrls?.jobFinished            || undefined,
+      projectCompletion:      body.callbackUrls?.projectCompletion      || undefined,
+      sourceFileUpdated:      body.callbackUrls?.sourceFileUpdated      || undefined,
+      projectActivityChanged: body.callbackUrls?.projectActivityChanged || undefined,
+    };
+
+    const project: import('@mercury/core').Project = {
+      projectId,
+      name: body.name,
+      customerId,
+      templateId: template?.templateId ?? 0,
+      sourceLanguage,
+      targetLanguage,
+      method: body.method,
+      status: 'CREATED',
+      activity: 'ACTIVE',
+      freelancerId,
+      callbackUrls,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await Collections.projects(db).insertOne(project);
+
+    const broker = fastify.broker;
+    await fireAdminCallback(db, broker, {
+      projectId,
+      customerId,
+      event: 'project-created',
+      url: callbackUrls.projectCreated,
+      build: () => buildProjectCreatedWebhook(callbackUrls.projectCreated!, projectId),
+      payload: { xtmProjectId: projectId },
+    });
+    await fireAdminCallback(db, broker, {
+      projectId,
+      customerId,
+      event: 'analysis-finished',
+      url: callbackUrls.analysisFinished,
+      build: () => buildAnalysisFinishedWebhook(callbackUrls.analysisFinished!, projectId),
+      payload: { xtmProjectId: projectId },
+    });
+
+    return reply.status(201).send({
+      id: String(projectId),
+      projectId,
+      name: project.name,
+      customerId: String(customerId),
+      sourceLang: sourceLanguage,
+      targetLang: targetLanguage,
+      status: project.status,
+      activity: project.activity,
+      method: project.method,
+      jobCount: 0,
+      poNumber: '',
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    });
+  });
 };
+
+async function fireAdminCallback(
+  db: import('mongodb').Db,
+  broker: MessageBroker,
+  opts: {
+    projectId: number;
+    customerId: number;
+    event: CallbackLog['event'];
+    url: string | undefined;
+    build: () => import('@mercury/core').WebhookRequest;
+    payload?: Record<string, unknown>;
+  },
+): Promise<void> {
+  if (!opts.url) return;
+  const now = new Date();
+  const callbackId = await nextId(db, 'callback');
+  const req = opts.build();
+  await Collections.callbackLogs(db).insertOne({
+    callbackId,
+    projectId: opts.projectId,
+    event: opts.event,
+    url: req.url,
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+    payload: opts.payload ?? {},
+    attempts: 0,
+    success: false,
+    createdAt: now,
+  });
+  await broker.enqueueWebhook({
+    callbackId,
+    projectId: opts.projectId,
+    customerId: opts.customerId,
+    event: opts.event,
+    url: req.url,
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+  });
+}
 
 export default adminProjectRoutes;

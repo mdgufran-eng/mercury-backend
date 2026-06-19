@@ -33,11 +33,20 @@ export function buildJobFinishedWebhook(
   projectId: number,
   jobId: number,
   customerId: number,
+  translatedContent?: unknown,
 ): WebhookRequest {
   const url = new URL(callbackUrl);
   url.searchParams.set('xtmJobId', String(jobId));
   url.searchParams.set('xtmProjectId', String(projectId));
   url.searchParams.set('xtmCustomerId', String(customerId));
+  if (translatedContent !== undefined) {
+    return {
+      method: 'POST',
+      url: url.toString(),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ xtmProjectId: projectId, xtmJobId: jobId, xtmCustomerId: customerId, translatedContent }),
+    };
+  }
   return {
     method: 'GET',
     url: url.toString(),

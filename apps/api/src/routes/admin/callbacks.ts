@@ -24,7 +24,38 @@ const adminCallbackRoutes: FastifyPluginAsync = async (fastify) => {
       Collections.callbackLogs(db).countDocuments(filter),
     ]);
 
-    return reply.send({ data, total, limit, skip });
+    const projectIds = [...new Set(data.map((c) => c.projectId))];
+    const jobIds = [...new Set(data.map((c) => c.jobId).filter((id): id is number => id != null))];
+
+    const [projects, jobs] = await Promise.all([
+      Collections.projects(db).find({ projectId: { $in: projectIds } }).toArray(),
+      jobIds.length > 0 ? Collections.jobs(db).find({ jobId: { $in: jobIds } }).toArray() : Promise.resolve([]),
+    ]);
+
+    const projMap = new Map(projects.map((p) => [p.projectId, p.name]));
+    const jobMap = new Map(jobs.map((j) => [j.jobId, j.fileName]));
+
+    return reply.send({
+      data: data.map((c) => ({
+        id: String(c.callbackId),
+        callbackId: c.callbackId,
+        projectId: String(c.projectId),
+        projectName: projMap.get(c.projectId) ?? String(c.projectId),
+        jobId: c.jobId ? String(c.jobId) : null,
+        jobFileName: c.jobId ? (jobMap.get(c.jobId) ?? null) : null,
+        event: c.event,
+        url: c.url,
+        method: c.method,
+        success: c.success,
+        statusCode: c.responseStatus ?? 0,
+        attempts: c.attempts,
+        sentAt: c.lastAttemptAt?.toISOString() ?? c.createdAt.toISOString(),
+        body: c.body ?? null,
+      })),
+      total,
+      limit,
+      skip,
+    });
   });
 
   // POST /admin/api/callbacks/:id/resend — re-enqueue a failed callback

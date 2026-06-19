@@ -10,6 +10,7 @@ export async function createIndexes(db: Db): Promise<void> {
     Collections.jobs(db).createIndex({ jobId: 1 }, { unique: true }),
     Collections.jobs(db).createIndex({ projectId: 1 }),
     Collections.jobs(db).createIndex({ status: 1 }),
+    Collections.jobs(db).createIndex({ projectId: 1, fileName: 1 }, { unique: true }),
 
     Collections.segments(db).createIndex({ segmentId: 1 }, { unique: true }),
     Collections.segments(db).createIndex({ jobId: 1 }),

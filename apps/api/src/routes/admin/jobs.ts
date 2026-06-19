@@ -25,6 +25,14 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
         Collections.jobs(db).countDocuments({ projectId }),
       ]);
 
+      const segCounts = await Collections.segments(db)
+        .aggregate<{ _id: number; count: number }>([
+          { $match: { projectId } },
+          { $group: { _id: '$jobId', count: { $sum: 1 } } },
+        ])
+        .toArray();
+      const segCountMap = new Map(segCounts.map((s) => [s._id, s.count]));
+
       return reply.send({
         data: jobs.map((j) => ({
           id: String(j.jobId),
@@ -38,6 +46,8 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
           wordCount: j.wordCount,
           billableWords: j.billableWords,
           sourceHash: j.sourceHash,
+          segmentCount: segCountMap.get(j.jobId) ?? 0,
+          completedAt: j.completedAt?.toISOString() ?? null,
           createdAt: j.createdAt.toISOString(),
           updatedAt: j.updatedAt.toISOString(),
         })),
@@ -56,7 +66,10 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
     const job = await Collections.jobs(db).findOne({ jobId });
     if (!job) return reply.status(404).send({ error: 'Job not found' });
 
-    const proj = await Collections.projects(db).findOne({ projectId: job.projectId });
+    const [proj, segmentCount] = await Promise.all([
+      Collections.projects(db).findOne({ projectId: job.projectId }),
+      Collections.segments(db).countDocuments({ jobId: job.jobId }),
+    ]);
 
     return reply.send({
       id: String(job.jobId),
@@ -69,10 +82,77 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
       method: proj?.method ?? 'MACHINE',
       wordCount: job.wordCount,
       billableWords: job.billableWords,
+      segmentCount,
+      completedAt: job.completedAt?.toISOString() ?? null,
       createdAt: job.createdAt.toISOString(),
       updatedAt: job.updatedAt.toISOString(),
     });
   });
+
+  // POST /admin/api/projects/:projectId/jobs — multipart file upload from frontend
+  fastify.post<{ Params: { projectId: string } }>(
+    '/admin/api/projects/:projectId/jobs',
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const db = fastify.mongo;
+      const { createHash } = await import('node:crypto');
+
+      const project = await Collections.projects(db).findOne({ projectId });
+      if (!project) return reply.status(404).send({ error: 'Project not found' });
+
+      const files: Array<{ filename: string; buffer: Buffer }> = [];
+      for await (const part of request.parts()) {
+        if (part.type === 'file') {
+          const buffer = await part.toBuffer();
+          files.push({ filename: part.filename, buffer });
+        }
+      }
+
+      if (files.length === 0) return reply.status(400).send({ error: 'No files provided' });
+
+      const now = new Date();
+      const created: Array<{ jobId: number; fileName: string }> = [];
+
+      for (const f of files) {
+        const sourceHash = createHash('sha256').update(f.buffer).digest('hex');
+        let sourceContent: Record<string, unknown> = {};
+        try { sourceContent = JSON.parse(f.buffer.toString('utf-8')); } catch { /* non-JSON */ }
+
+        const jobId = await nextId(db, 'job');
+        const job: import('@mercury/core').Job = {
+          jobId,
+          projectId,
+          fileName: f.filename,
+          sourceFileKey: `projects/${projectId}/jobs/${jobId}/source/${f.filename}`,
+          status: 'CREATED',
+          wordCount: 0,
+          billableWords: 0,
+          sourceHash,
+          sourceContent,
+          createdAt: now,
+          updatedAt: now,
+        };
+        await Collections.jobs(db).insertOne(job);
+        await fastify.broker.enqueueTranslate({
+          projectId,
+          jobId,
+          sourceLanguage: project.sourceLanguage,
+          targetLanguage: project.targetLanguage,
+        });
+        created.push({ jobId, fileName: f.filename });
+      }
+
+      // Update project status to ACTIVE if still CREATED
+      if (project.status === 'CREATED') {
+        await Collections.projects(db).updateOne(
+          { projectId },
+          { $set: { status: 'ACTIVE', updatedAt: now } },
+        );
+      }
+
+      return reply.status(201).send({ projectId, jobs: created });
+    },
+  );
 
   // POST /admin/api/projects/:projectId/jobs/:jobId/complete
   // Human translator marks a job done — validates segments, reassembles target JSON,
@@ -137,7 +217,7 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
 
       await Collections.jobs(db).updateOne(
         { jobId },
-        { $set: { targetContent, status: 'FINISHED', billableWords, updatedAt: now } },
+        { $set: { targetContent, status: 'FINISHED', billableWords, completedAt: now, updatedAt: now } },
       );
 
       // Fire job-finished callback
@@ -229,6 +309,10 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
             processId: `PO-${projectId}-${costId}`,
             createdAt: now,
           });
+          await Collections.projects(db).updateOne(
+            { projectId },
+            { $set: { poNumber: `PO-${projectId}-${costId}`, updatedAt: now } },
+          );
         }
       }
 
