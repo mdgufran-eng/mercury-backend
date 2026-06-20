@@ -329,13 +329,39 @@ const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
 
       const now = new Date();
 
+      // Count words from sourceContent for jobs that haven't been translated
+      const countContentWords = (obj: unknown): number => {
+        if (typeof obj === 'string') return obj.trim().split(/\s+/).filter(Boolean).length;
+        if (Array.isArray(obj)) return obj.reduce((s: number, v: unknown) => s + countContentWords(v), 0);
+        if (obj && typeof obj === 'object')
+          return Object.values(obj as Record<string, unknown>).reduce(
+            (s: number, v: unknown) => s + countContentWords(v), 0,
+          );
+        return 0;
+      };
+
       // Mark all unfinished jobs as FINISHED with the current sourceContent as targetContent
       const jobs = await Collections.jobs(db).find({ projectId }).toArray();
       for (const job of jobs) {
+        // Recount words from content envelope if wordCount is still 0
+        let wc = job.wordCount;
+        if (!wc || wc === 0) {
+          const src = (job.sourceContent as Record<string, unknown> | undefined)?.['content']
+            ?? job.sourceContent ?? {};
+          wc = countContentWords(src);
+        }
         if (job.status !== 'FINISHED') {
           await Collections.jobs(db).updateOne(
             { jobId: job.jobId },
-            { $set: { status: 'FINISHED', targetContent: job.sourceContent ?? {}, updatedAt: now } },
+            {
+              $set: {
+                status: 'FINISHED',
+                targetContent: job.sourceContent ?? {},
+                wordCount: wc,
+                billableWords: wc,
+                updatedAt: now,
+              },
+            },
           );
         }
       }
@@ -427,6 +453,44 @@ const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
       );
       if (!result) return reply.status(404).send({ error: 'Project not found' });
       return reply.send({ success: true, projectId, status });
+    },
+  );
+
+  // GET /admin/api/projects/:projectId/costs — cost + PO summary for the project
+  fastify.get<{ Params: { projectId: string } }>(
+    '/admin/api/projects/:projectId/costs',
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const db = fastify.mongo;
+
+      const cost = await Collections.costs(db).findOne({ projectId }, { sort: { costId: -1 } } as never);
+      if (!cost) return reply.send(null);
+
+      const po = await Collections.purchaseOrders(db).findOne({ costId: cost.costId });
+      let vendorName = 'LLM';
+      let vendorEmail = '';
+      if (cost.freelancerId) {
+        const fl = await Collections.freelancers(db).findOne({ freelancerId: cost.freelancerId });
+        if (fl) { vendorName = fl.name; vendorEmail = fl.email; }
+      }
+
+      return reply.send({
+        costId: cost.costId,
+        totalWords: cost.totalWords,
+        billableWords: cost.billableWords,
+        ratePerWord: cost.ratePerWord,
+        amount: cost.amount,
+        currency: cost.currency,
+        vendor: { name: vendorName, email: vendorEmail },
+        po: po ? {
+          poId: po.poId,
+          processId: po.processId,
+          amount: po.amount,
+          currency: po.currency,
+          createdAt: po.createdAt.toISOString(),
+        } : null,
+        createdAt: cost.createdAt.toISOString(),
+      });
     },
   );
 };
