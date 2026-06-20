@@ -16,3 +16,8 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.env
+.claude/
+apps/api/dist/
+apps/worker/dist/
+packages/core/dist/
