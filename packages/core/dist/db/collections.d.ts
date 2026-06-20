@@ -1,0 +1,13 @@
+import { Collection, Db } from 'mongodb';
+import type { Project, Job, Segment, TMEntry, CallbackLog, Customer, Template, Freelancer, Counter, Cost, PurchaseOrder } from '../types/domain.js';
+export declare function projects(db: Db): Collection<Project>;
+export declare function jobs(db: Db): Collection<Job>;
+export declare function segments(db: Db): Collection<Segment>;
+export declare function callbackLogs(db: Db): Collection<CallbackLog>;
+export declare function customers(db: Db): Collection<Customer>;
+export declare function templates(db: Db): Collection<Template>;
+export declare function freelancers(db: Db): Collection<Freelancer>;
+export declare function counters(db: Db): Collection<Counter>;
+export declare function costs(db: Db): Collection<Cost>;
+export declare function purchaseOrders(db: Db): Collection<PurchaseOrder>;
+export declare function translationMemory(db: Db): Collection<TMEntry>;

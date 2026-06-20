@@ -76,6 +76,8 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
       jobId: job.jobId,
       projectId: job.projectId,
       fileName: job.fileName,
+      sourceContent: job.sourceContent ?? {},
+      sourceHash: job.sourceHash,
       sourceLang: proj?.sourceLanguage ?? '',
       targetLang: proj?.targetLanguage ?? '',
       status: job.status === 'CREATED' ? 'PENDING' : job.status === 'FINISHED' ? 'COMPLETED' : job.status,
@@ -166,6 +168,104 @@ const adminJobRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return reply.status(201).send({ projectId, jobs: created });
+    },
+  );
+
+  // PUT /admin/api/projects/:projectId/jobs/:jobId — edit source filename/content and re-enqueue
+  fastify.put<{
+    Params: { projectId: string; jobId: string };
+    Body: { fileName?: string; sourceContent?: Record<string, unknown> };
+  }>(
+    '/admin/api/projects/:projectId/jobs/:jobId',
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const jobId = parseInt(request.params.jobId, 10);
+      const db = fastify.mongo;
+      const { createHash } = await import('node:crypto');
+
+      const [project, job] = await Promise.all([
+        Collections.projects(db).findOne({ projectId }),
+        Collections.jobs(db).findOne({ projectId, jobId }),
+      ]);
+
+      if (!project || !job) return reply.status(404).send({ error: 'Project or job not found' });
+
+      const nextFileName = request.body.fileName?.trim() || job.fileName;
+      if (!nextFileName) return reply.status(400).send({ error: 'fileName is required' });
+
+      const sourceContent = request.body.sourceContent ?? job.sourceContent ?? {};
+      if (
+        sourceContent === null ||
+        Array.isArray(sourceContent) ||
+        typeof sourceContent !== 'object'
+      ) {
+        return reply.status(400).send({ error: 'sourceContent must be a JSON object' });
+      }
+
+      if (nextFileName !== job.fileName) {
+        const duplicate = await Collections.jobs(db).findOne({ projectId, fileName: nextFileName });
+        if (duplicate) {
+          return reply.status(409).send({ error: 'A file with this name already exists in the project' });
+        }
+      }
+
+      const now = new Date();
+      const sourceHash = createHash('sha256')
+        .update(JSON.stringify(sourceContent))
+        .digest('hex');
+
+      await resetAndEnqueueJob(fastify.broker, db, {
+        projectId,
+        jobId,
+        sourceLanguage: project.sourceLanguage,
+        targetLanguage: project.targetLanguage,
+        fileName: nextFileName,
+        sourceFileKey: `projects/${projectId}/jobs/${jobId}/source/${nextFileName}`,
+        sourceHash,
+        sourceContent,
+        now,
+      });
+
+      return reply.send({ success: true, projectId, jobId, fileName: nextFileName });
+    },
+  );
+
+  // DELETE /admin/api/projects/:projectId/jobs/:jobId — delete uploaded file/job
+  fastify.delete<{ Params: { projectId: string; jobId: string } }>(
+    '/admin/api/projects/:projectId/jobs/:jobId',
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const jobId = parseInt(request.params.jobId, 10);
+      const db = fastify.mongo;
+
+      const [project, job] = await Promise.all([
+        Collections.projects(db).findOne({ projectId }),
+        Collections.jobs(db).findOne({ projectId, jobId }),
+      ]);
+
+      if (!project || !job) return reply.status(404).send({ error: 'Project or job not found' });
+
+      await Promise.all([
+        Collections.segments(db).deleteMany({ projectId, jobId }),
+        Collections.jobs(db).deleteOne({ projectId, jobId }),
+      ]);
+
+      const now = new Date();
+      const remainingJobs = await Collections.jobs(db).find({ projectId }).toArray();
+      let status: import('@mercury/core').ProjectStatus = 'CREATED';
+      if (remainingJobs.length > 0) {
+        status = remainingJobs.every((j) => j.status === 'FINISHED')
+          ? 'FINISHED'
+          : remainingJobs.some((j) => j.status === 'IN_PROGRESS')
+            ? 'IN_PROGRESS'
+            : 'ACTIVE';
+      }
+      await Collections.projects(db).updateOne(
+        { projectId },
+        { $set: { status, updatedAt: now } },
+      );
+
+      return reply.send({ success: true, projectId, jobId });
     },
   );
 
@@ -415,15 +515,20 @@ async function resetAndEnqueueJob(
     sourceLanguage: string;
     targetLanguage: string;
     now: Date;
+    fileName?: string;
+    sourceFileKey?: string;
     sourceHash?: string;
     sourceContent?: Record<string, unknown>;
   },
 ): Promise<void> {
   const set: Record<string, unknown> = {
     status: 'CREATED',
+    wordCount: 0,
     billableWords: 0,
     updatedAt: opts.now,
   };
+  if (opts.fileName !== undefined) set['fileName'] = opts.fileName;
+  if (opts.sourceFileKey !== undefined) set['sourceFileKey'] = opts.sourceFileKey;
   if (opts.sourceHash !== undefined) set['sourceHash'] = opts.sourceHash;
   if (opts.sourceContent !== undefined) set['sourceContent'] = opts.sourceContent;
 
