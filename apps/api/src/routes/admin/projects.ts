@@ -311,6 +311,83 @@ const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
       updatedAt: now.toISOString(),
     });
   });
+
+  // POST /admin/api/projects/:projectId/force-complete
+  // Directly marks all jobs + project as FINISHED and fires project-completion callback.
+  // Used for HUMAN project testing without going through the full CAT approval flow.
+  fastify.post<{ Params: { projectId: string } }>(
+    '/admin/api/projects/:projectId/force-complete',
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const db = fastify.mongo;
+
+      const project = await Collections.projects(db).findOne({ projectId });
+      if (!project) return reply.status(404).send({ error: 'Project not found' });
+      if (project.status === 'FINISHED') {
+        return reply.send({ success: true, alreadyFinished: true });
+      }
+
+      const now = new Date();
+
+      // Mark all unfinished jobs as FINISHED with the current sourceContent as targetContent
+      const jobs = await Collections.jobs(db).find({ projectId }).toArray();
+      for (const job of jobs) {
+        if (job.status !== 'FINISHED') {
+          await Collections.jobs(db).updateOne(
+            { jobId: job.jobId },
+            { $set: { status: 'FINISHED', targetContent: job.sourceContent ?? {}, updatedAt: now } },
+          );
+        }
+      }
+
+      // Mark project FINISHED
+      await Collections.projects(db).updateOne(
+        { projectId },
+        { $set: { status: 'FINISHED', updatedAt: now } },
+      );
+
+      // Fire project-completion callback
+      if (project.callbackUrls?.projectCompletion) {
+        const { buildProjectCompletionWebhook } = await import('@mercury/core');
+        await fireAdminCallback(db, fastify.broker, {
+          projectId,
+          customerId: project.customerId,
+          event: 'project-completion',
+          url: project.callbackUrls.projectCompletion,
+          build: () =>
+            buildProjectCompletionWebhook(
+              project.callbackUrls!.projectCompletion!,
+              projectId,
+              project.customerId,
+            ),
+          payload: { xtmProjectId: projectId, xtmCustomerId: project.customerId },
+        });
+      }
+
+      return reply.send({ success: true, projectId, jobsMarked: jobs.length });
+    },
+  );
+
+  // PATCH /admin/api/projects/:projectId/status — change project status directly
+  fastify.patch<{ Params: { projectId: string }; Body: { status: string } }>(
+    '/admin/api/projects/:projectId/status',
+    async (request, reply) => {
+      const projectId = parseInt(request.params.projectId, 10);
+      const { status } = request.body;
+      const allowed = ['CREATED', 'ACTIVE', 'IN_PROGRESS', 'FINISHED', 'FAILED'];
+      if (!allowed.includes(status)) {
+        return reply.status(400).send({ error: `status must be one of: ${allowed.join(', ')}` });
+      }
+      const db = fastify.mongo;
+      const result = await Collections.projects(db).findOneAndUpdate(
+        { projectId },
+        { $set: { status: status as import('@mercury/core').ProjectStatus, updatedAt: new Date() } },
+        { returnDocument: 'after' },
+      );
+      if (!result) return reply.status(404).send({ error: 'Project not found' });
+      return reply.send({ success: true, projectId, status });
+    },
+  );
 };
 
 async function fireAdminCallback(
