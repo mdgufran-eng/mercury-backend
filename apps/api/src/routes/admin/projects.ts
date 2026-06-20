@@ -364,6 +364,47 @@ const adminProjectRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
+      // Auto-create Cost + PO for HUMAN projects (same as complete-job endpoint)
+      if (project.method === 'HUMAN') {
+        let ratePerWord = 0.05;
+        let freelancerId: number | undefined;
+        let vendorFirstName: string | undefined;
+        let vendorLastName: string | undefined;
+        let vendorName = 'LLM';
+
+        if (project.freelancerId) {
+          const fl = await Collections.freelancers(db).findOne({ freelancerId: project.freelancerId });
+          if (fl) {
+            ratePerWord = fl.ratePerWord;
+            freelancerId = fl.freelancerId;
+            vendorName = fl.name;
+            const [first, ...rest] = fl.name.split('-');
+            vendorFirstName = first;
+            vendorLastName = rest.join('-') || undefined;
+          }
+        }
+
+        const allJobs = await Collections.jobs(db).find({ projectId }).toArray();
+        const totalWords = allJobs.reduce((s, j) => s + (j.wordCount ?? 0), 0);
+        const totalBillable = allJobs.reduce((s, j) => s + (j.billableWords ?? 0), 0);
+        const amount = Math.round(totalBillable * ratePerWord * 100) / 100;
+        const { nextId } = await import('@mercury/core');
+        const costId = await nextId(db, 'cost');
+
+        await Collections.costs(db).insertOne({
+          costId, projectId, freelancerId, vendorFirstName, vendorLastName,
+          totalWords, billableWords: totalBillable, ratePerWord, amount,
+          currency: 'USD', createdAt: now,
+        });
+
+        const poId = await nextId(db, 'po');
+        await Collections.purchaseOrders(db).insertOne({
+          poId, costId, projectId, freelancerId, vendorName,
+          amount, currency: 'USD',
+          processId: `PO-${projectId}-${costId}`, createdAt: now,
+        });
+      }
+
       return reply.send({ success: true, projectId, jobsMarked: jobs.length });
     },
   );
